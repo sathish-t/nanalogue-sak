@@ -1,0 +1,63 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+step_started=$SECONDS
+echo "[orb setup] Checking native build dependencies"
+
+packages=(
+  build-essential
+  cmake
+  pkg-config
+  clang-19
+  libclang-19-dev
+  libssl-dev
+  zlib1g-dev
+  libbz2-dev
+  liblzma-dev
+  curl
+  ca-certificates
+)
+missing_packages=()
+for package in "${packages[@]}"; do
+  if ! dpkg-query -W -f='${db:Status-Abbrev}' "$package" 2>/dev/null | grep -q '^ii '; then
+    missing_packages+=("$package")
+  fi
+done
+
+if ((${#missing_packages[@]})); then
+  if ((EUID == 0)); then
+    apt=(apt-get)
+  else
+    apt=(sudo apt-get)
+  fi
+  "${apt[@]}" update
+  "${apt[@]}" install -y --no-install-recommends "${missing_packages[@]}"
+else
+  echo "[orb setup] Native build dependencies are already installed"
+fi
+echo "[orb setup] Native dependencies ready in $((SECONDS - step_started))s"
+
+step_started=$SECONDS
+echo "[orb setup] Installing stable Rust with Clippy and rustfmt"
+if [[ ! -x "$HOME/.cargo/bin/rustup" ]]; then
+  curl --proto '=https' --tlsv1.2 --fail --silent --show-error \
+    https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain none
+fi
+
+# shellcheck disable=SC1091
+source "$HOME/.cargo/env"
+rustup toolchain install stable --profile minimal --component clippy,rustfmt
+rustup default stable
+
+cargo_profile_line='[ -f "$HOME/.cargo/env" ] && . "$HOME/.cargo/env"'
+touch "$HOME/.bash_profile"
+if ! grep -Fqx "$cargo_profile_line" "$HOME/.bash_profile"; then
+  printf '\n%s\n' "$cargo_profile_line" >> "$HOME/.bash_profile"
+fi
+echo "[orb setup] Rust toolchain ready in $((SECONDS - step_started))s"
+
+step_started=$SECONDS
+echo "[orb setup] Fetching and building locked workspace dependencies"
+cargo fetch --locked
+cargo build --locked --workspace --all-targets
+echo "[orb setup] Workspace ready in $((SECONDS - step_started))s"
