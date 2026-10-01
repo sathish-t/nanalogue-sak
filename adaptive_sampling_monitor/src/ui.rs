@@ -1,8 +1,7 @@
 //! Crossterm screen lifecycle, logarithmic bars and keyboard navigation.
 
 use std::io::{self, Write as _};
-use std::sync::mpsc::{Receiver, TryRecvError};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crossterm::cursor::{Hide, MoveTo, Show};
 use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
@@ -16,12 +15,15 @@ use crossterm::terminal::{
 use crossterm::{execute, queue};
 
 use crate::bed::Region;
-use crate::error::{Result, message};
-use crate::monitor::{Snapshot, Stats};
+use crate::error::Result;
+use crate::monitor::{Monitor, Snapshot, Stats};
 use crate::text::escape;
 
 /// Rows reserved for title, statistics, headings, axis and status/footer.
 const CHROME_ROWS: usize = 9;
+
+/// Delay between synchronous directory scans.
+const POLL_INTERVAL: Duration = Duration::from_mins(1);
 
 /// The viewer's restrained teal, used only for the data and live status.
 const TEAL: Color = Color::Rgb {
@@ -74,47 +76,54 @@ impl Drop for TerminalGuard {
     }
 }
 
-/// Redraws while the worker scans; quitting never waits for a BAM to finish.
-pub(crate) fn run(regions: &[Region], receiver: &Receiver<Snapshot>) -> Result<()> {
+/// Draws after input events and scans synchronously once per poll interval.
+pub(crate) fn run(regions: &[Region], monitor: &mut Monitor) -> Result<()> {
     let _terminal = TerminalGuard::enter()?;
-    let mut snapshot = Snapshot::new(regions.len());
     let mut offset: usize = 0;
-    let mut running = true;
-    while running {
-        match receiver.try_recv() {
-            Ok(update) => snapshot = update,
-            Err(TryRecvError::Empty) => {}
-            Err(TryRecvError::Disconnected) => {
-                return Err(message("BAM worker stopped unexpectedly"));
-            }
-        }
+    let mut next_poll = Instant::now();
+    loop {
         let (width, height) = terminal::size()?;
         let visible = usize::from(height).saturating_sub(CHROME_ROWS).max(1);
         offset = offset.min(regions.len().saturating_sub(visible));
-        draw(&frame(regions, &snapshot, offset, width, height))?;
-        if event::poll(Duration::from_millis(100))?
-            && let Event::Key(key) = event::read()?
-            && key.kind != KeyEventKind::Release
-        {
-            if key.code == KeyCode::Char('q')
-                || (key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL))
+        draw(&frame(regions, monitor.snapshot(), offset, width, height))?;
+
+        let now = Instant::now();
+        if now >= next_poll {
+            monitor.refresh();
+            next_poll = Instant::now()
+                .checked_add(POLL_INTERVAL)
+                .unwrap_or_else(Instant::now);
+            continue;
+        }
+        if event::poll(next_poll.saturating_duration_since(now))? {
+            if let Event::Key(key) = event::read()?
+                && key.kind != KeyEventKind::Release
             {
-                running = false;
-            } else if matches!(key.code, KeyCode::Down | KeyCode::Char('j')) {
-                offset = offset.saturating_add(1);
-            } else if matches!(key.code, KeyCode::Up | KeyCode::Char('k')) {
-                offset = offset.saturating_sub(1);
-            } else if key.code == KeyCode::PageDown {
-                offset = offset.saturating_add(visible);
-            } else if key.code == KeyCode::PageUp {
-                offset = offset.saturating_sub(visible);
-            } else if key.code == KeyCode::Home {
-                offset = 0;
-            } else if key.code == KeyCode::End {
-                offset = regions.len().saturating_sub(visible);
-            } else {
-                // Other keys do not change the view.
+                #[expect(
+                    clippy::wildcard_enum_match_arm,
+                    reason = "KeyCode is non-exhaustive and unhandled keys intentionally do nothing"
+                )]
+                match key.code {
+                    KeyCode::Char('q') => break,
+                    KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => break,
+                    KeyCode::Down | KeyCode::Char('j') => {
+                        offset = offset.saturating_add(1);
+                    }
+                    KeyCode::Up | KeyCode::Char('k') => {
+                        offset = offset.saturating_sub(1);
+                    }
+                    KeyCode::PageDown => offset = offset.saturating_add(visible),
+                    KeyCode::PageUp => offset = offset.saturating_sub(visible),
+                    KeyCode::Home => offset = 0,
+                    KeyCode::End => offset = regions.len().saturating_sub(visible),
+                    _ => {}
+                }
             }
+        } else {
+            monitor.refresh();
+            next_poll = Instant::now()
+                .checked_add(POLL_INTERVAL)
+                .unwrap_or_else(Instant::now);
         }
     }
     Ok(())

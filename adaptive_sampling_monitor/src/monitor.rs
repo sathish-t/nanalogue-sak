@@ -5,7 +5,6 @@ use std::ffi::OsStr;
 use std::fs;
 use std::io::{Read as _, Seek as _, SeekFrom};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Instant, SystemTime};
 
 use nanalogue_core::bedrs::Intersect as _;
@@ -81,8 +80,8 @@ struct Contribution {
     stats: Vec<Stats>,
 }
 
-/// Consistent display state sent by the background worker.
-#[derive(Debug, Clone)]
+/// Consistent statistics and status displayed between synchronous scans.
+#[derive(Debug)]
 pub(crate) struct Snapshot {
     /// Totals in BED-file order.
     pub stats: Vec<Stats>,
@@ -112,7 +111,7 @@ impl Snapshot {
     }
 }
 
-/// Worker-owned cache; the UI receives only coherent snapshots.
+/// Per-file cache and current display state.
 #[derive(Debug)]
 pub(crate) struct Monitor {
     /// Target directory; descendants are included without following symlinks.
@@ -136,47 +135,36 @@ impl Monitor {
         }
     }
 
-    /// Discovers changes and publishes progress while retaining good old data.
-    pub(crate) fn refresh<F>(&mut self, stop: &AtomicBool, mut publish: F)
-    where
-        F: FnMut(&Snapshot),
-    {
+    /// Discovers changes and updates the display state while retaining good old data.
+    pub(crate) fn refresh(&mut self) {
         self.snapshot.warning = None;
         self.snapshot.pending = 0;
         "Discovering BAM files".clone_into(&mut self.snapshot.activity);
-        publish(&self.snapshot);
         let mut candidates = Vec::new();
         let directory = self.directory.clone();
-        self.discover(&directory, stop, &mut candidates);
+        self.discover(&directory, &mut candidates);
         candidates.sort_by(|left, right| left.0.cmp(&right.0));
         self.snapshot.pending = self.snapshot.pending.saturating_add(candidates.len());
         for (path, before) in candidates {
-            if stop.load(Ordering::Relaxed) {
-                return;
-            }
-            self.snapshot.activity = format!("Scanning {}", path.display());
-            publish(&self.snapshot);
-            let result = scan(&path, &self.regions, stop)
-                .and_then(|stats| self.accept(&path, before, stats));
+            let result =
+                scan(&path, &self.regions).and_then(|stats| self.accept(&path, before, stats));
             match result {
                 Ok(()) => self.snapshot.pending = self.snapshot.pending.saturating_sub(1),
                 Err(error) => {
                     self.snapshot.warning = Some(format!("{}: {error}", path.display()));
                 }
             }
-            publish(&self.snapshot);
         }
         "Watching; checking for changes every 60s".clone_into(&mut self.snapshot.activity);
-        publish(&self.snapshot);
+    }
+
+    /// Returns the latest complete statistics and monitoring status.
+    pub(crate) fn snapshot(&self) -> &Snapshot {
+        &self.snapshot
     }
 
     /// Recurses through eligible directories without following symbolic links.
-    fn discover(
-        &mut self,
-        directory: &Path,
-        stop: &AtomicBool,
-        candidates: &mut Vec<(PathBuf, Fingerprint)>,
-    ) {
+    fn discover(&mut self, directory: &Path, candidates: &mut Vec<(PathBuf, Fingerprint)>) {
         let entries = match fs::read_dir(directory) {
             Ok(entries) => entries,
             Err(error) => {
@@ -185,9 +173,6 @@ impl Monitor {
             }
         };
         for result in entries {
-            if stop.load(Ordering::Relaxed) {
-                return;
-            }
             let entry = match result {
                 Ok(entry) => entry,
                 Err(error) => {
@@ -210,7 +195,7 @@ impl Monitor {
                 continue;
             }
             if file_type.is_dir() {
-                self.discover(&path, stop, candidates);
+                self.discover(&path, candidates);
                 continue;
             }
             if !path
@@ -291,7 +276,7 @@ fn eligible_name(file_name: &OsStr) -> bool {
 }
 
 /// Uses nanalogue's read model and interval intersection without parsing modifications.
-fn scan(path: &Path, regions: &[Region], stop: &AtomicBool) -> Result<Vec<Stats>> {
+fn scan(path: &Path, regions: &[Region]) -> Result<Vec<Stats>> {
     check_eof(path)?;
     let mut reader = nanalogue_bam_reader(path)?;
     ensure(
@@ -317,7 +302,6 @@ fn scan(path: &Path, regions: &[Region], stop: &AtomicBool) -> Result<Vec<Stats>
         .collect::<Result<Vec<_>>>()?;
     let mut stats = vec![Stats::default(); regions.len()];
     for result in reader.records() {
-        ensure(!stop.load(Ordering::Relaxed), "scan cancelled")?;
         let record = result?;
         let read = CurrRead::default().set_read_state_and_id(&record)?;
         if !matches!(

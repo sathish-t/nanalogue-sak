@@ -11,11 +11,6 @@ use std::fs::File;
 use std::io::{self, BufReader, IsTerminal as _, Write as _};
 use std::path::PathBuf;
 use std::process::ExitCode;
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc;
-use std::thread;
-use std::time::Duration;
 
 use error::{Context as _, Result, ensure};
 
@@ -65,22 +60,6 @@ impl Args {
     }
 }
 
-/// Wakes and cancels the background worker whenever the UI exits or fails.
-#[derive(Debug)]
-struct WorkerGuard {
-    /// Per-record cancellation avoids waiting for a large BAM to finish.
-    stop: Arc<AtomicBool>,
-    /// Interrupts the sixty-second poll wait on shutdown.
-    wake: mpsc::Sender<()>,
-}
-
-impl Drop for WorkerGuard {
-    fn drop(&mut self) {
-        self.stop.store(true, Ordering::Relaxed);
-        let _disconnected = self.wake.send(());
-    }
-}
-
 /// Escapes external diagnostics even before the live screen has been entered.
 fn main() -> ExitCode {
     let arguments: Vec<OsString> = std::env::args_os().skip(1).collect();
@@ -124,36 +103,13 @@ fn run(args: Args) -> Result<()> {
 
     // HTSlib writes diagnostics directly to stderr; scan errors are instead
     // reported in the status row, preserving the alternate-screen display.
-    // SAFETY: This sets HTSlib's global logging level with a valid enum constant,
-    // before starting any worker threads or calling any other HTSlib functions.
+    // SAFETY: This sets HTSlib's global logging level with a valid enum constant
+    // before calling any other HTSlib functions.
     unsafe {
         rust_htslib::htslib::hts_set_log_level(rust_htslib::htslib::htsLogLevel_HTS_LOG_OFF);
     }
-    let stop = Arc::new(AtomicBool::new(false));
-    let (wake, sleeper) = mpsc::channel();
-    let _worker_guard = WorkerGuard {
-        stop: Arc::clone(&stop),
-        wake,
-    };
-    let (sender, receiver) = mpsc::sync_channel(1);
     let mut monitor = monitor::Monitor::new(args.directory, &regions);
-    let _worker = thread::Builder::new()
-        .name("bam-monitor".to_owned())
-        .spawn(move || {
-            while !stop.load(Ordering::Relaxed) {
-                monitor.refresh(&stop, |snapshot| {
-                    if sender.send(snapshot.clone()).is_err() {
-                        stop.store(true, Ordering::Relaxed);
-                    }
-                });
-                if sleeper.recv_timeout(Duration::from_secs(60))
-                    != Err(mpsc::RecvTimeoutError::Timeout)
-                {
-                    break;
-                }
-            }
-        })?;
-    ui::run(&regions, &receiver)
+    ui::run(&regions, &mut monitor)
 }
 
 #[cfg(test)]

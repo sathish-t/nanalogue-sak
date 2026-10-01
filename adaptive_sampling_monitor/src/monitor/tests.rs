@@ -3,7 +3,7 @@
 use super::*;
 use rust_htslib::bam::{self, Header, HeaderView, Record, header::HeaderRecord};
 use std::fs::{File, FileTimes};
-use std::sync::atomic::AtomicU64;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, UNIX_EPOCH};
 
 /// Unique suffix for test directories created in the same process.
@@ -66,7 +66,7 @@ fn write_bam(path: &Path, records: &[&str]) -> Result<()> {
 
 /// Executes a refresh immediately; production schedules the next one at 60s.
 fn poll(monitor: &mut Monitor) {
-    monitor.refresh(&AtomicBool::new(false), |_| {});
+    monitor.refresh();
 }
 
 /// New invalid BAM paths are reported and skipped without blocking valid files.
@@ -179,7 +179,7 @@ fn nested_half_open_overlaps() -> Result<()> {
             "cross\t0\tchr1\t40\t60\t1M60D1M\t*\t0\t0\tAA\t*",
         ],
     )?;
-    let actual = scan(&path, &targets, &AtomicBool::new(false))?;
+    let actual = scan(&path, &targets)?;
     assert_eq!(
         actual,
         vec![
@@ -391,7 +391,7 @@ fn fingerprint_and_change_during_scan() -> Result<()> {
     poll(&mut monitor);
     let accepted = monitor.snapshot.stats.clone();
     let before = Fingerprint::read(&path)?;
-    let scanned = scan(&path, &monitor.regions, &AtomicBool::new(false))?;
+    let scanned = scan(&path, &monitor.regions)?;
     write_bam(&path, &[read, read, read])?;
     File::options()
         .write(true)
@@ -422,22 +422,6 @@ fn fingerprint_and_change_during_scan() -> Result<()> {
         monitor.snapshot.stats.first(),
         Some(&Stats { count: 3, bases: 9 }),
         "next stable scan replaces the old contribution"
-    );
-    Ok(())
-}
-
-/// Cancellation discards an in-progress scan rather than publishing partial data.
-#[test]
-fn cancelled_scan_is_not_accepted() -> Result<()> {
-    let directory = TestDirectory::new()?;
-    let path = directory.path().join("reads.bam");
-    write_bam(&path, &["read\t0\tchr1\t101\t60\t3M\t*\t0\t0\tAAA\t*"])?;
-    let error = scan(&path, &regions()?, &AtomicBool::new(true))
-        .expect_err("cancellation must stop scanning");
-    assert_eq!(
-        error.to_string(),
-        "scan cancelled",
-        "no partial scan result escapes"
     );
     Ok(())
 }
