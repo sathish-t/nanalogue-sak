@@ -16,8 +16,8 @@ use rust_htslib::bam::{FetchDefinition, Read as _};
 use crate::bed::Region;
 use crate::error::{Context as _, Result, ensure};
 
-/// Deliberate input ceiling for this small exploratory monitor.
-const MAX_BAM_BYTES: u64 = 100_000;
+/// Upper bound for BAM batches suitable for responsive real-time monitoring.
+const MAX_BAM_BYTES: u64 = 5_000_000_000;
 
 /// Count and reconstructed length total from nanalogue read statistics.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
@@ -151,7 +151,7 @@ impl Monitor {
             ensure(
                 before.bam_size <= MAX_BAM_BYTES,
                 format!(
-                    "BAM exceeds the 100 kB size limit ({} bytes): {}",
+                    "BAM exceeds the 5 GB size limit ({} bytes): {}. This real-time monitor expects smaller BAM batches; decrease the output batching interval in MinKNOW",
                     before.bam_size,
                     path.display()
                 ),

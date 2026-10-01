@@ -52,14 +52,17 @@ This adds no validation of BAM read IDs beyond nanalogue's existing checks.
   Coordinates must satisfy `0 <= start < end <= u32::MAX`,
   matching nanalogue's coordinate representation.
   Blank lines, `#` comments and `track`/`browser` metadata lines are ignored.
-  Extra BED columns, including strand, are ignored.
+  Extra BED columns, including strand, are ignored. The BED file may be at most
+  100 kB (100,000 bytes).
 - BAMs must already be **aligned** to the BED's reference. Contig names must match
   exactly (`chr1` and `1` are different). MinKNOW output alignment needs to be
   enabled separately; adaptive sampling alone should not be assumed to supply it.
   A BAM without reference sequences is reported as pending with an explanation.
   Each `file.bam` must have the `file.bam.bai` index produced alongside MinKNOW's
   [aligned BAM output](https://software-docs.nanoporetech.com/output-specifications/26.01/read_formats/bam/).
-  BAMs larger than 100 kB (100,000 bytes) are fatal input errors.
+  BAMs larger than 5 GB (5,000,000,000 bytes) are fatal input errors because this
+  real-time monitor expects smaller batches; decrease MinKNOW's output batching
+  interval if needed.
 - Only **primary forward and primary reverse** records count, selected with
   nanalogue's read-stats filter. There is no additional mapping-quality or
   pass/fail filter. MinKNOW's `bam_fail` folder is not the SAM QC-failed flag.

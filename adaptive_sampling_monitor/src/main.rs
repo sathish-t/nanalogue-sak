@@ -91,6 +91,11 @@ fn run(args: Args) -> Result<()> {
     text::check_path(&args.directory)?;
     let input = File::open(&args.bed_file)
         .with_context(|| format!("opening {}", args.bed_file.display()))?;
+    let bed_size = input
+        .metadata()
+        .with_context(|| format!("reading metadata for {}", args.bed_file.display()))?
+        .len();
+    bed::ensure_size(bed_size)?;
     let regions = bed::parse(BufReader::new(input))?;
     ensure(
         args.directory.is_dir(),

@@ -6,6 +6,9 @@ use std::io::BufRead;
 use crate::error::{Context as _, Result, ensure, message};
 use crate::text::is_printable_ascii;
 
+/// Deliberate ceiling for the monitor's small target configuration.
+const MAX_BED_BYTES: u64 = 100_000;
+
 /// A named BED interval, retained in input order for display.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Region {
@@ -17,6 +20,14 @@ pub(crate) struct Region {
     pub end: u32,
     /// Unique fourth-column display label.
     pub name: String,
+}
+
+/// Rejects target files too large for this exploratory real-time display.
+pub(crate) fn ensure_size(size: u64) -> Result<()> {
+    ensure(
+        size <= MAX_BED_BYTES,
+        format!("BED exceeds the 100 kB size limit ({size} bytes)"),
+    )
 }
 
 /// Parses BED4+, accepting blank, comment, track and browser lines.
@@ -158,6 +169,19 @@ mod tests {
                 "contig whitespace has an actionable diagnostic: {error}"
             );
         }
+        Ok(())
+    }
+
+    /// The documented BED ceiling is inclusive and uses decimal kilobytes.
+    #[test]
+    fn file_size_boundary() -> Result<()> {
+        ensure_size(MAX_BED_BYTES)?;
+        let error = ensure_size(MAX_BED_BYTES.checked_add(1).context("size overflow")?)
+            .expect_err("BED above 100 kB must be rejected");
+        assert!(
+            error.to_string().contains("100 kB size limit"),
+            "size error is actionable: {error}"
+        );
         Ok(())
     }
 }

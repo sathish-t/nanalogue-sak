@@ -256,7 +256,7 @@ fn missing_index_remains_pending() -> Result<()> {
     Ok(())
 }
 
-/// Oversized BAMs are rejected permanently rather than retried every minute.
+/// BAM batches above the real-time ceiling are rejected permanently.
 #[test]
 fn oversized_bam_is_fatal() -> Result<()> {
     let directory = TestDirectory::new()?;
@@ -274,9 +274,11 @@ fn oversized_bam_is_fatal() -> Result<()> {
         .set_len(MAX_BAM_BYTES.checked_add(1).context("size overflow")?)?;
     let error = monitor
         .refresh()
-        .expect_err("BAM above 100 kB must stop the monitor");
+        .expect_err("BAM above 5 GB must stop the monitor");
     assert!(
-        error.to_string().contains("100 kB size limit"),
+        error
+            .to_string()
+            .contains("decrease the output batching interval"),
         "size error is actionable: {error}"
     );
     Ok(())
