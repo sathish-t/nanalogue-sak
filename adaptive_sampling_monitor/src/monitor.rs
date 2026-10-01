@@ -150,7 +150,13 @@ impl Monitor {
             let result =
                 scan(&path, &self.regions).and_then(|stats| self.accept(&path, before, stats));
             match result {
-                Ok(()) => self.snapshot.pending = self.snapshot.pending.saturating_sub(1),
+                Ok(()) => {
+                    self.snapshot.pending = self
+                        .snapshot
+                        .pending
+                        .checked_sub(1)
+                        .context("pending BAM count underflow")?;
+                }
                 Err(error) => {
                     self.snapshot.warning = Some(format!("{}: {error}", path.display()));
                 }
