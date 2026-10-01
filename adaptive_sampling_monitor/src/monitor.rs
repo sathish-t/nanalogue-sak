@@ -16,6 +16,9 @@ use rust_htslib::bam::{FetchDefinition, Read as _};
 use crate::bed::Region;
 use crate::error::{Context as _, Result, ensure};
 
+/// Deliberate input ceiling for this small exploratory monitor.
+const MAX_BAM_BYTES: u64 = 100_000;
+
 /// Count and reconstructed length total from nanalogue read statistics.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct Stats {
@@ -145,6 +148,14 @@ impl Monitor {
         candidates.sort_by(|left, right| left.0.cmp(&right.0));
         self.snapshot.pending = self.snapshot.pending.saturating_add(candidates.len());
         for (path, before) in candidates {
+            ensure(
+                before.bam_size <= MAX_BAM_BYTES,
+                format!(
+                    "BAM exceeds the 100 kB size limit ({} bytes): {}",
+                    before.bam_size,
+                    path.display()
+                ),
+            )?;
             let result =
                 scan(&path, &self.regions).and_then(|stats| self.accept(&path, before, stats));
             match result {

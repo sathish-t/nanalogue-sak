@@ -256,6 +256,32 @@ fn missing_index_remains_pending() -> Result<()> {
     Ok(())
 }
 
+/// Oversized BAMs are rejected permanently rather than retried every minute.
+#[test]
+fn oversized_bam_is_fatal() -> Result<()> {
+    let directory = TestDirectory::new()?;
+    let path = directory.path().join("reads.bam");
+    write_bam(&path, &["read\t0\tchr1\t101\t60\t3M\t*\t0\t0\tAAA\t*"])?;
+    File::options()
+        .write(true)
+        .open(&path)?
+        .set_len(MAX_BAM_BYTES)?;
+    let mut monitor = Monitor::new(directory.path().to_path_buf(), &regions()?);
+    monitor.refresh()?;
+    File::options()
+        .write(true)
+        .open(&path)?
+        .set_len(MAX_BAM_BYTES.checked_add(1).context("size overflow")?)?;
+    let error = monitor
+        .refresh()
+        .expect_err("BAM above 100 kB must stop the monitor");
+    assert!(
+        error.to_string().contains("100 kB size limit"),
+        "size error is actionable: {error}"
+    );
+    Ok(())
+}
+
 /// Parsed read-stats fields reconstruct the weighted cross-BAM numerator.
 #[test]
 fn parses_read_stats_report() -> Result<()> {

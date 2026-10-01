@@ -59,6 +59,7 @@ This adds no validation of BAM read IDs beyond nanalogue's existing checks.
   A BAM without reference sequences is reported as pending with an explanation.
   Each `file.bam` must have the `file.bam.bai` index produced alongside MinKNOW's
   [aligned BAM output](https://software-docs.nanoporetech.com/output-specifications/26.01/read_formats/bam/).
+  BAMs larger than 100 kB (100,000 bytes) are fatal input errors.
 - Only **primary forward and primary reverse** records count, selected with
   nanalogue's read-stats filter. There is no additional mapping-quality or
   pass/fail filter. MinKNOW's `bam_fail` folder is not the SAM QC-failed flag.
