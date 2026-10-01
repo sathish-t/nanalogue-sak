@@ -126,14 +126,15 @@ updates; polling cannot make unpublished reads available sooner.
 
 ## Building and checking
 
-Use current stable Rust with Clippy and rustfmt. The native HTSlib dependencies
-need a C compiler, CMake, pkg-config, OpenSSL, zlib, bzip2, xz/liblzma and libclang.
-For Debian 12, a suitable setup is:
+Rust 1.99.0, Clippy and rustfmt are pinned in `rust-toolchain.toml`; rustup selects
+and installs that toolchain automatically. Upgrade the pin deliberately together
+with any resulting lint fixes. The native HTSlib dependencies need a C compiler,
+CMake, pkg-config, OpenSSL, zlib, bzip2, xz/liblzma and libclang. For Debian 12, a
+suitable setup is:
 
 ```sh
 sudo apt-get install build-essential cmake pkg-config clang-19 libclang-19-dev \
   libssl-dev zlib1g-dev libbz2-dev liblzma-dev
-rustup component add clippy rustfmt
 cargo build --locked --workspace
 cargo test --locked --workspace --all-targets
 cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
