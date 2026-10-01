@@ -333,10 +333,6 @@ fn frame(
         .unwrap_or(0)
         .max(10);
     let decades = maximum.saturating_sub(1).ilog10().saturating_add(1);
-    let updated = snapshot.updated.map_or_else(
-        || "not yet".to_owned(),
-        |time| format!("{}s ago", time.elapsed().as_secs()),
-    );
     let (ticks, rule) = axis(decades, graph_width);
     let prefix = " ".repeat(name_width.saturating_add(3));
     let mut lines = vec![
@@ -348,7 +344,7 @@ fn frame(
         ],
         vec![
             format!(
-                " BAMs: {} processed  |  {} pending  |  updated {updated}  |  poll 60s",
+                " BAMs: {} processed  |  {} pending  |  poll 60s",
                 snapshot.processed, snapshot.pending
             )
             .with(TEAL),

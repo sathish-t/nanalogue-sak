@@ -301,11 +301,11 @@ fn recursive_discovery_replacement_and_retry() -> Result<()> {
     );
     assert_eq!(monitor.snapshot.processed, 2, "both final BAMs accepted");
     assert_eq!(monitor.snapshot.pending, 0, "temporary paths pruned");
-    let updated = monitor.snapshot.updated;
+    let unchanged = monitor.snapshot.stats.clone();
     poll(&mut monitor)?;
     assert_eq!(
-        monitor.snapshot.updated, updated,
-        "unchanged files are not scanned twice"
+        monitor.snapshot.stats, unchanged,
+        "unchanged poll preserves accepted totals"
     );
 
     write_bam(&pass, &[long, short, long])?;

@@ -5,7 +5,7 @@ use std::ffi::OsStr;
 use std::fs;
 use std::io::{Read as _, Seek as _, SeekFrom};
 use std::path::{Path, PathBuf};
-use std::time::{Instant, SystemTime};
+use std::time::SystemTime;
 
 use nanalogue_core::bedrs::Intersect as _;
 use nanalogue_core::{CurrRead, GenomicBed3, GenomicStrandedBed3, ReadState, nanalogue_bam_reader};
@@ -93,8 +93,6 @@ pub(crate) struct Snapshot {
     pub activity: String,
     /// Most recent problem in this poll, cleared when the next poll succeeds.
     pub warning: Option<String>,
-    /// Time at which a contribution was last accepted.
-    pub updated: Option<Instant>,
 }
 
 impl Snapshot {
@@ -106,7 +104,6 @@ impl Snapshot {
             pending: 0,
             activity: "Discovering BAM files".to_owned(),
             warning: None,
-            updated: None,
         }
     }
 }
@@ -278,7 +275,6 @@ impl Monitor {
         );
         self.snapshot.stats = totals;
         self.snapshot.processed = self.files.len();
-        self.snapshot.updated = Some(Instant::now());
         Ok(())
     }
 }
