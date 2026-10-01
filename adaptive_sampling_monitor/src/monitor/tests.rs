@@ -43,7 +43,7 @@ fn regions() -> Result<Vec<Region>> {
     crate::bed::parse(&b"chr1\t100\t200\tA\nchr1\t180\t300\tB\nchr2\t0\t100\tC\n"[..])
 }
 
-/// Writes SAM records into an unindexed BAM using deliberately reversed targets.
+/// Writes coordinate-sorted SAM records into a BAM and builds its BAI index.
 fn write_bam(path: &Path, records: &[&str]) -> Result<()> {
     let mut header = Header::new();
     let _chr2 = header.push_record(
@@ -57,10 +57,17 @@ fn write_bam(path: &Path, records: &[&str]) -> Result<()> {
             .push_tag(b"LN", 1000),
     );
     let view = HeaderView::from_header(&header);
+    let mut parsed = records
+        .iter()
+        .map(|text| Record::from_sam(&view, text.as_bytes()).map_err(Into::into))
+        .collect::<Result<Vec<_>>>()?;
+    parsed.sort_by_key(|record| (record.tid().is_negative(), record.tid(), record.pos()));
     let mut writer = bam::Writer::from_path(path, &header, bam::Format::Bam)?;
-    for text in records {
-        writer.write(&Record::from_sam(&view, text.as_bytes())?)?;
+    for record in &parsed {
+        writer.write(record)?;
     }
+    drop(writer);
+    bam::index::build(path, None, bam::index::Type::Bai, 2)?;
     Ok(())
 }
 
@@ -105,9 +112,9 @@ fn skips_non_ascii_and_control_paths() -> Result<()> {
     Ok(())
 }
 
-/// Confirms half-open spans, reverse reads, CIGAR reference consumption and flags.
+/// Confirms indexed overlaps, filters and read-stats' integer means.
 #[test]
-fn primary_overlap_and_full_lengths() -> Result<()> {
+fn primary_overlap_and_read_stats_means() -> Result<()> {
     let directory = TestDirectory::new()?;
     let path = directory.path().join("reads.bam");
     write_bam(
@@ -144,17 +151,17 @@ fn primary_overlap_and_full_lengths() -> Result<()> {
         vec![
             Stats {
                 count: 5,
-                bases: 57
+                bases: 55
             },
             Stats {
                 count: 4,
-                bases: 50
+                bases: 48
             },
             Stats { count: 1, bases: 3 }
         ],
-        "full lengths are accumulated independently in each overlapping region"
+        "each region uses its own primary count and truncated read-stats mean"
     );
-    assert_eq!(monitor.snapshot.processed, 1, "unindexed BAM is accepted");
+    assert_eq!(monitor.snapshot.processed, 1, "indexed BAM is accepted");
     assert_eq!(
         monitor.snapshot.pending, 0,
         "no pending files after success"
@@ -194,9 +201,9 @@ fn nested_half_open_overlaps() -> Result<()> {
     Ok(())
 }
 
-/// `CurrRead` validation must not be bypassed or allow a partial replacement.
+/// Read-stats receives only primary records and replaces a prior contribution.
 #[test]
-fn nanalogue_validation_retains_previous_contribution() -> Result<()> {
+fn read_stats_primary_filter_replaces_contribution() -> Result<()> {
     let directory = TestDirectory::new()?;
     let path = directory.path().join("reads.bam");
     let good = "good\t0\tchr1\t101\t60\t3M\t*\t0\t0\tAAA\t*";
@@ -209,51 +216,63 @@ fn nanalogue_validation_retains_previous_contribution() -> Result<()> {
         Some(&Stats { count: 1, bases: 3 }),
         "valid initial data is accepted"
     );
-    for (invalid, expected) in [
-        (
-            "paired\t1\tchr1\t101\t60\t3M\t*\t0\t0\tAAA\t*",
-            "flags not supported",
-        ),
-        (
-            "duplicate\t1024\tchr1\t101\t60\t3M\t*\t0\t0\tAAA\t*",
-            "flags not supported",
-        ),
-        (
-            "qc\t512\tchr1\t101\t60\t3M\t*\t0\t0\tAAA\t*",
-            "flags not supported",
-        ),
-        (
-            "missing\t0\tchr1\t101\t60\t3M\t*\t0\t0\t*\t*",
-            "0-len sequences",
-        ),
-    ] {
-        write_bam(&path, &[good, good, invalid])?;
-        poll(&mut monitor)?;
-        assert_eq!(
-            monitor.snapshot.stats, accepted,
-            "no partial data replaces the accepted file"
-        );
-        assert_eq!(monitor.snapshot.pending, 1, "invalid BAM remains pending");
-        assert!(
-            monitor
-                .snapshot
-                .warning
-                .as_ref()
-                .is_some_and(|warning| warning.contains(expected)),
-            "nanalogue's validation error must be visible: {:?}",
-            monitor.snapshot.warning
-        );
-    }
-    write_bam(&path, &[good, good])?;
+    let secondary = "secondary\t256\tchr1\t101\t60\t3M\t*\t0\t0\t*\t*";
+    let supplementary = "supplementary\t2048\tchr1\t101\t60\t3M\t*\t0\t0\t*\t*";
+    let unmapped = "unmapped\t4\t*\t0\t0\t*\t*\t0\t0\tAAA\t*";
+    write_bam(&path, &[good, good, secondary, supplementary, unmapped])?;
     poll(&mut monitor)?;
     assert_eq!(
         monitor.snapshot.stats.first(),
         Some(&Stats { count: 2, bases: 6 }),
-        "valid retry replaces old data"
+        "primary-filtered read-stats replaces the old contribution"
     );
     assert_eq!(
         monitor.snapshot.pending, 0,
         "valid retry clears pending state"
+    );
+    Ok(())
+}
+
+/// MinKNOW-style indexed input is required rather than silently scanning the BAM.
+#[test]
+fn missing_index_remains_pending() -> Result<()> {
+    let directory = TestDirectory::new()?;
+    let path = directory.path().join("reads.bam");
+    write_bam(&path, &["read\t0\tchr1\t101\t60\t3M\t*\t0\t0\tAAA\t*"])?;
+    fs::remove_file(path.with_extension("bam.bai"))?;
+    let mut monitor = Monitor::new(directory.path().to_path_buf(), &regions()?);
+    poll(&mut monitor)?;
+    assert_eq!(monitor.snapshot.processed, 0, "BAM is not accepted");
+    assert_eq!(monitor.snapshot.pending, 1, "missing index remains pending");
+    assert!(
+        monitor
+            .snapshot
+            .warning
+            .as_ref()
+            .is_some_and(|warning| warning.contains("index")),
+        "missing index is reported: {:?}",
+        monitor.snapshot.warning
+    );
+    Ok(())
+}
+
+/// Parsed read-stats fields reconstruct the weighted cross-BAM numerator.
+#[test]
+fn parses_read_stats_report() -> Result<()> {
+    let report = b"key\tvalue\nn_primary_alignments\t3\nseq_len_mean\t133\n";
+    assert_eq!(
+        parse_read_stats(report)?,
+        Stats {
+            count: 3,
+            bases: 399
+        },
+        "count multiplied by mean supplies the weighted numerator"
+    );
+    let error = parse_read_stats(b"key\tvalue\nn_primary_alignments\t3\n")
+        .expect_err("missing mean must fail");
+    assert!(
+        error.to_string().contains("seq_len_mean"),
+        "missing field is actionable"
     );
     Ok(())
 }
@@ -314,9 +333,9 @@ fn recursive_discovery_replacement_and_retry() -> Result<()> {
         monitor.snapshot.stats.first(),
         Some(&Stats {
             count: 5,
-            bases: 31
+            bases: 29
         }),
-        "changed file replaces, not adds to, the old contribution"
+        "changed file replaces the old read-stats contribution"
     );
 
     // A missing footer must not replace accepted data even if records can be read.
@@ -330,7 +349,7 @@ fn recursive_discovery_replacement_and_retry() -> Result<()> {
         monitor.snapshot.stats.first(),
         Some(&Stats {
             count: 5,
-            bases: 31
+            bases: 29
         }),
         "failed scan retains previous totals"
     );
@@ -402,7 +421,7 @@ fn fingerprint_and_change_during_scan() -> Result<()> {
     write_bam(&path, &[read])?;
     let initial = Fingerprint::read(&path)?;
     let later = initial
-        .modified
+        .bam_modified
         .checked_add(Duration::from_secs(2))
         .context("timestamp overflow")?;
     File::options()
@@ -410,8 +429,26 @@ fn fingerprint_and_change_during_scan() -> Result<()> {
         .open(&path)?
         .set_times(FileTimes::new().set_modified(later))?;
     let touched = Fingerprint::read(&path)?;
-    assert_eq!(initial.size, touched.size, "touch does not change size");
+    assert_eq!(
+        initial.bam_size, touched.bam_size,
+        "touch does not change BAM size"
+    );
     assert_ne!(initial, touched, "timestamp alone detects a change");
+    let index_path = path.with_extension("bam.bai");
+    let index_later = touched
+        .bai_modified
+        .checked_add(Duration::from_secs(2))
+        .context("index timestamp overflow")?;
+    File::options()
+        .write(true)
+        .open(index_path)?
+        .set_times(FileTimes::new().set_modified(index_later))?;
+    let index_touched = Fingerprint::read(&path)?;
+    assert_eq!(
+        touched.bam_modified, index_touched.bam_modified,
+        "touching the index leaves BAM metadata unchanged"
+    );
+    assert_ne!(touched, index_touched, "BAI timestamp detects a change");
 
     let mut monitor = Monitor::new(directory.path().to_path_buf(), &regions()?);
     poll(&mut monitor)?;
@@ -422,15 +459,15 @@ fn fingerprint_and_change_during_scan() -> Result<()> {
     File::options()
         .write(true)
         .open(&path)?
-        .set_times(FileTimes::new().set_modified(before.modified))?;
+        .set_times(FileTimes::new().set_modified(before.bam_modified))?;
     let after = Fingerprint::read(&path)?;
     assert_ne!(
-        before.size, after.size,
-        "fixture changes size independently of timestamp"
+        before.bam_size, after.bam_size,
+        "fixture changes BAM size independently of timestamp"
     );
     assert_eq!(
-        before.modified, after.modified,
-        "timestamp is deliberately preserved"
+        before.bam_modified, after.bam_modified,
+        "BAM timestamp is deliberately preserved"
     );
     let error = monitor
         .accept(&path, before, scanned)

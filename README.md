@@ -22,8 +22,8 @@ begins with `-`. Invalid invocations exit with status 1. The monitor does not us
 Clap directly; nanalogue still brings it in as a transitive dependency.
 
 The terminal shows one horizontal logarithmic **read-count** bar per BED region.
-Solid Unicode blocks with eighth-cell tips form the bars; exact counts and mean
-full read lengths float directly after each bar, e.g. `1,547 reads | mean 2,099.9 bp`.
+Solid Unicode blocks with eighth-cell tips form the bars; exact counts and weighted
+mean full read lengths float directly after each bar, e.g. `1,547 reads | mean 2,099.9 bp`.
 Rows stay in BED order. Zero counts have an empty bar and `-` for their mean;
 positive counts use a log10 axis with decade labels. The scale is shared across
 all rows, even when scrolling. Use a Unicode-capable terminal at least 72 columns
@@ -57,40 +57,39 @@ This adds no validation of BAM read IDs beyond nanalogue's existing checks.
   exactly (`chr1` and `1` are different). MinKNOW output alignment needs to be
   enabled separately; adaptive sampling alone should not be assumed to supply it.
   A BAM without reference sequences is reported as pending with an explanation.
-- Only **primary mapped** records count, classified through nanalogue's `CurrRead`
-  and `ReadState`. There is no additional mapping-quality or pass/fail filter.
-  Nanalogue's validation applies: unsupported paired/mate, duplicate or QC-failed
-  flags, invalid flag combinations and malformed primary alignments make the BAM
-  pending with a warning, retaining its previous contribution rather than accepting
-  partial statistics. MinKNOW's `bam_fail` folder is not the SAM QC-failed flag.
+  Each `file.bam` must have the `file.bam.bai` index produced alongside MinKNOW's
+  [aligned BAM output](https://software-docs.nanoporetech.com/output-specifications/26.01/read_formats/bam/).
+- Only **primary forward and primary reverse** records count, selected with
+  nanalogue's read-stats filter. There is no additional mapping-quality or
+  pass/fail filter. MinKNOW's `bam_fail` folder is not the SAM QC-failed flag.
 - Any overlap between the half-open BED interval and the alignment's reference
   span counts. Deletions and reference skips are part of that span; insertions
   and soft clips do not extend it. A read can count in several BED regions.
-- Mean length is the sum of stored sequence lengths divided by the read count.
-  It includes soft-clipped bases, excludes hard-clipped bases not stored in BAM,
-  and is rounded to one decimal for display. Nanalogue rejects missing sequences
-  on primary mapped records; excluded secondary/supplementary/unmapped records
-  need not contain a sequence.
-- No BAM index is required. Read IDs are not deduplicated across files: point at
-  one set of outputs, not a parent containing both original BAMs and their copies,
-  merged BAMs, or reanalysed versions.
+- Nanalogue read-stats reports an integer `seq_len_mean` for each BAM and region.
+  The monitor reconstructs that file's length total as
+  `seq_len_mean * n_primary_alignments`, then divides the sum of those totals by
+  the total primary count. Thus the displayed cross-BAM mean is weighted by read
+  count, but inherits read-stats' per-file integer truncation before it is rounded
+  to one decimal for display. Sequence length includes soft-clipped bases and
+  excludes hard-clipped bases not stored in BAM.
+- Read IDs are not deduplicated across files: point at one set of outputs, not a
+  parent containing both original BAMs and their copies, merged BAMs, or
+  reanalysed versions.
 
 ### How this uses nanalogue
 
-The scanner opens BAMs with `nanalogue_bam_reader`, classifies records with
-`CurrRead::set_read_state_and_id`, and loads sequence length and alignment data
-through `CurrRead` setters. `GenomicStrandedBed3::try_from(&read)` supplies the
-reference span; nanalogue's `bedrs::Intersect` tests each BED target for overlap.
-It does not parse modification tags or implement its own CIGAR or overlap logic.
+The scanner opens each BAM with `nanalogue_indexed_bam_reader` and assigns two
+HTSlib decompression threads. For each BED interval it fetches only the indexed
+region, configures `InputBam` with that interval and the
+`primary_forward,primary_reverse` filter, passes the filtered records to
+`read_stats::run`, and extracts `n_primary_alignments` and `seq_len_mean` from its
+report. It does not parse records, CIGAR strings or modification tags itself.
 Target IDs are resolved separately for each BAM header; absent contigs stay zero.
 
-Only the streaming count/length-sum accumulators, per-file replacement cache and
-terminal presentation live here. Nanalogue's `read_stats` is a report-producing
-API (including median and N50), not a structured per-BED aggregate API. The direct
-rust-htslib dependency provides the reader trait/header access required by
-nanalogue's public API, diagnostic suppression and test-fixture writing; read
-interpretation belongs to nanalogue. Scanning uses one BAM pass and checks each
-primary read against the BED targets.
+The per-file replacement cache, weighted aggregation of read-stats reports and
+terminal presentation live here. The direct rust-htslib dependency provides the
+indexed reader traits, diagnostic suppression and test-fixture writing required
+around nanalogue's public API; read filtering and statistics belong to nanalogue.
 
 ### File monitoring
 
@@ -105,10 +104,11 @@ Hidden entries, `tmp`, `temp`, `queued_reads`, and names ending in `.tmp`,
 the supplied directory. Symlink entries are not followed. Use a final-output
 directory rather than explicitly selecting a temporary directory as the root.
 
-Each successfully processed path retains its size, modification timestamp and
-per-region counts/length sums. If its metadata changes, a new scan **replaces**
-its previous contribution; it never adds the same file twice. Results are
-accepted only after a successful scan and matching before/after metadata.
+Each successfully processed path retains the size and modification timestamp of
+both its BAM and BAI, plus per-region counts and reconstructed length totals. If
+either file's metadata changes, a new scan **replaces** its previous contribution;
+it never adds the same file twice. Results are accepted only after a successful
+scan and matching before/after metadata for both files.
 Incomplete/unreadable files are retried next cycle while their last accepted
 contribution remains visible. A standard 28-byte BAM end marker is required;
 there are no content hashes or integrity guarantees. The status row shows the
@@ -145,5 +145,5 @@ cargo fmt --all -- --check
 Nanalogue is pinned to a revision of its `main` branch. All upstream Cargo lint
 settings are copied unchanged into `[workspace.lints]`; each member uses
 `[lints] workspace = true`. New projects should inherit these settings too.
-The lockfile is shared and tracked. Tests generate small, unindexed BAM fixtures
-locally and need neither MinKNOW nor sequencing hardware.
+The lockfile is shared and tracked. Tests generate small, coordinate-sorted and
+indexed BAM fixtures locally and need neither MinKNOW nor sequencing hardware.

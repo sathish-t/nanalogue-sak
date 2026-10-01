@@ -5,35 +5,27 @@ use std::ffi::OsStr;
 use std::fs;
 use std::io::{Read as _, Seek as _, SeekFrom};
 use std::path::{Path, PathBuf};
+use std::str;
 use std::time::SystemTime;
 
-use nanalogue_core::bedrs::Intersect as _;
-use nanalogue_core::{CurrRead, GenomicBed3, GenomicStrandedBed3, ReadState, nanalogue_bam_reader};
-use rust_htslib::bam::Read as _;
+use nanalogue_core::{
+    BamPreFilt as _, GenomicBed3, InputBamBuilder, nanalogue_indexed_bam_reader, read_stats,
+};
+use rust_htslib::bam::{FetchDefinition, Read as _};
 
 use crate::bed::Region;
 use crate::error::{Context as _, Result, ensure};
 
-/// Exact sufficient statistics; means are computed only for display.
+/// Count and reconstructed length total from nanalogue read statistics.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct Stats {
     /// Number of primary mapped reads overlapping this region.
     pub count: u64,
-    /// Sum of full stored sequence lengths, including soft clipping.
+    /// Primary count multiplied by nanalogue's integer mean sequence length.
     pub bases: u64,
 }
 
 impl Stats {
-    /// Accumulates one read without silently wrapping counters.
-    fn add_read(&mut self, length: u64) -> Result<()> {
-        self.count = self.count.checked_add(1).context("read count overflow")?;
-        self.bases = self
-            .bases
-            .checked_add(length)
-            .context("base count overflow")?;
-        Ok(())
-    }
-
     /// Replaces one file's contribution in a global total.
     fn replace(self, old: Self, new: Self) -> Result<Self> {
         Ok(Self {
@@ -54,19 +46,28 @@ impl Stats {
 /// Cheap change detector, not a content-integrity guarantee.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct Fingerprint {
-    /// File size in bytes.
-    size: u64,
-    /// Highest-resolution modification time exposed by the filesystem.
-    modified: SystemTime,
+    /// BAM size in bytes.
+    bam_size: u64,
+    /// BAM modification time at the filesystem's highest exposed resolution.
+    bam_modified: SystemTime,
+    /// BAI size in bytes.
+    bai_size: u64,
+    /// BAI modification time at the filesystem's highest exposed resolution.
+    bai_modified: SystemTime,
 }
 
 impl Fingerprint {
-    /// Reads the metadata used both before and after scanning.
+    /// Reads BAM and MinKNOW-style `.bam.bai` metadata around each scan.
     fn read(path: &Path) -> Result<Self> {
         let metadata = fs::metadata(path)?;
+        let index_path = path.with_extension("bam.bai");
+        let index_metadata = fs::metadata(&index_path)
+            .with_context(|| format!("reading BAM index {}", index_path.display()))?;
         Ok(Self {
-            size: metadata.len(),
-            modified: metadata.modified()?,
+            bam_size: metadata.len(),
+            bam_modified: metadata.modified()?,
+            bai_size: index_metadata.len(),
+            bai_modified: index_metadata.modified()?,
         })
     }
 }
@@ -296,56 +297,58 @@ fn eligible_name(file_name: &OsStr) -> bool {
         && !name.ends_with(".part.bam")
 }
 
-/// Uses nanalogue's read model and interval intersection without parsing modifications.
+/// Runs nanalogue read-stats on each indexed BED region with primary-only filtering.
 fn scan(path: &Path, regions: &[Region]) -> Result<Vec<Stats>> {
     check_eof(path)?;
-    let mut reader = nanalogue_bam_reader(path)?;
+    let mut reader = nanalogue_indexed_bam_reader(path, FetchDefinition::All)?;
+    reader.set_threads(2)?;
     ensure(
         reader.header().target_count() > 0,
         "BAM has no reference sequences; enable MinKNOW output alignment",
     )?;
-    // An absent contig contributes zero; numeric target IDs are local to each BAM.
-    let targets = regions
-        .iter()
-        .map(|region| {
-            reader
-                .header()
-                .tid(region.contig.as_bytes())
-                .map(|tid| -> Result<GenomicBed3> {
-                    Ok(GenomicBed3::new(
-                        i32::try_from(tid)?,
-                        region.start,
-                        region.end,
-                    )?)
-                })
-                .transpose()
-        })
-        .collect::<Result<Vec<_>>>()?;
     let mut stats = vec![Stats::default(); regions.len()];
-    for result in reader.records() {
-        let record = result?;
-        let read = CurrRead::default().set_read_state_and_id(&record)?;
-        if !matches!(
-            read.read_state(),
-            ReadState::PrimaryFwd | ReadState::PrimaryRev
-        ) {
+    for (region, total) in regions.iter().zip(&mut stats) {
+        let Some(tid) = reader.header().tid(region.contig.as_bytes()) else {
             continue;
-        }
-        // Populate only the data we need, after filtering out non-primary reads
-        // (secondary alignments can legitimately omit their stored sequence).
-        let aligned = read
-            .set_seq_len(&record)?
-            .set_align_len(&record)?
-            .set_contig_id_and_start(&record)?;
-        let span = GenomicStrandedBed3::try_from(&aligned)?;
-        let length = u64::from(aligned.seq_len()?);
-        for (target, total) in targets.iter().zip(&mut stats) {
-            if target.is_some_and(|interval| interval.intersect(&span).is_some()) {
-                total.add_read(length)?;
-            }
-        }
+        };
+        let interval = GenomicBed3::new(i32::try_from(tid)?, region.start, region.end)?;
+        reader.fetch((tid, region.start, region.end))?;
+        let options = InputBamBuilder::default()
+            .read_filter("primary_forward,primary_reverse".to_owned())
+            .region_bed3(interval)
+            .build()?;
+        let mut report = Vec::new();
+        let records = reader.rc_records().filter(|result| {
+            result
+                .as_ref()
+                .map_or(true, |record| record.pre_filt(&options))
+        });
+        read_stats::run(&mut report, records)?;
+        *total = parse_read_stats(&report)?;
     }
     Ok(stats)
+}
+
+/// Extracts the two read-stats fields needed for cross-BAM weighted means.
+fn parse_read_stats(report: &[u8]) -> Result<Stats> {
+    let text = str::from_utf8(report)?;
+    let value = |key: &str| -> Result<u64> {
+        let raw = text
+            .lines()
+            .filter_map(|line| line.split_once('\t'))
+            .find_map(|(name, value)| (name == key).then_some(value))
+            .with_context(|| format!("nanalogue read-stats output missing '{key}'"))?;
+        raw.parse()
+            .with_context(|| format!("invalid '{key}' in nanalogue read-stats output"))
+    };
+    let count = value("n_primary_alignments")?;
+    let mean = value("seq_len_mean")?;
+    Ok(Stats {
+        count,
+        bases: count
+            .checked_mul(mean)
+            .context("read-stats length total overflow")?,
+    })
 }
 
 /// Checks the standard BGZF end marker, not a checksum or integrity guarantee.

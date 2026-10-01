@@ -183,10 +183,10 @@ fn warning_text(message: &str, columns: usize) -> String {
     format!("{prefix}...{tail}")
 }
 
-/// Converts integer statistics to display-only floating point, not stored data.
+/// Converts reconstructed integer statistics to display-only floating point.
 #[expect(
     clippy::cast_precision_loss,
-    reason = "Display rounds means to one decimal; exact integer totals remain intact"
+    reason = "Display rounds the reconstructed weighted mean to one decimal"
 )]
 fn mean(stats: Stats) -> String {
     if stats.count == 0 {
@@ -209,7 +209,7 @@ fn grouped(digits: &str) -> String {
     reversed.chars().rev().collect()
 }
 
-/// Exact count and mean annotations, placed directly after each bar's tip.
+/// Count and reconstructed mean annotations, placed directly after each bar's tip.
 fn annotation(stats: Stats) -> (String, String) {
     let reads = if stats.count == 1 { "read" } else { "reads" };
     let count = format!("{} {reads}", grouped(&stats.count.to_string()));
