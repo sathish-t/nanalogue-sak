@@ -1,6 +1,7 @@
 //! Live terminal monitor of primary mapped reads overlapping named BED regions.
 
 mod bed;
+mod error;
 mod monitor;
 mod text;
 mod ui;
@@ -16,7 +17,7 @@ use std::sync::mpsc;
 use std::thread;
 use std::time::Duration;
 
-use anyhow::{Context as _, Result, ensure};
+use error::{Context as _, Result, ensure};
 
 /// Static help for the monitor's two positional arguments.
 const HELP: &str = "Live per-BED-region read counts and mean lengths from MinKNOW BAM output
@@ -46,17 +47,17 @@ impl Args {
         if arguments.first().is_some_and(|arg| arg == "--") {
             let _separator = paths.next();
         } else {
-            ensure!(
+            ensure(
                 !arguments
                     .iter()
                     .any(|arg| arg.as_encoded_bytes().starts_with(b"-")),
-                "unknown option; use --help, or -- before paths beginning with '-'"
-            );
+                "unknown option; use --help, or -- before paths beginning with '-'",
+            )?;
         }
         let usage = "expected exactly two paths: nanalogue_adaptive_sampling_monitor <BED_FILE> <DIRECTORY>";
         let bed_file = paths.next().context(usage)?;
         let directory = paths.next().context(usage)?;
-        ensure!(paths.next().is_none(), usage);
+        ensure(paths.next().is_none(), usage)?;
         Ok(Self {
             bed_file: bed_file.into(),
             directory: directory.into(),
@@ -99,11 +100,7 @@ fn main() -> ExitCode {
     match result {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
-            let _written = writeln!(
-                io::stderr(),
-                "Error: {}",
-                text::escape(&format!("{error:#}"))
-            );
+            let _written = writeln!(io::stderr(), "Error: {}", text::escape(&error.to_string()));
             ExitCode::FAILURE
         }
     }
@@ -116,15 +113,14 @@ fn run(args: Args) -> Result<()> {
     let input = File::open(&args.bed_file)
         .with_context(|| format!("opening {}", args.bed_file.display()))?;
     let regions = bed::parse(BufReader::new(input))?;
-    ensure!(
+    ensure(
         args.directory.is_dir(),
-        "not a directory: {}",
-        args.directory.display()
-    );
-    ensure!(
+        format!("not a directory: {}", args.directory.display()),
+    )?;
+    ensure(
         io::stdin().is_terminal() && io::stdout().is_terminal(),
-        "this tool requires an interactive terminal"
-    );
+        "this tool requires an interactive terminal",
+    )?;
 
     // HTSlib writes diagnostics directly to stderr; scan errors are instead
     // reported in the status row, preserving the alternate-screen display.

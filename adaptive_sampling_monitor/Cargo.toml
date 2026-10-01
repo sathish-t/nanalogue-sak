@@ -9,12 +9,7 @@ description = "Live per-region read counts and lengths from MinKNOW BAM output"
 [dependencies]
 nanalogue.workspace = true
 rust-htslib.workspace = true
-anyhow.workspace = true
 crossterm.workspace = true
-walkdir.workspace = true
-
-[dev-dependencies]
-tempfile.workspace = true
 
 [lints]
 workspace = true

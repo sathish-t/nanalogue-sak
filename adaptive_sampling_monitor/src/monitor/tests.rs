@@ -3,7 +3,40 @@
 use super::*;
 use rust_htslib::bam::{self, Header, HeaderView, Record, header::HeaderRecord};
 use std::fs::{File, FileTimes};
-use std::time::Duration;
+use std::sync::atomic::AtomicU64;
+use std::time::{Duration, UNIX_EPOCH};
+
+/// Unique suffix for test directories created in the same process.
+static NEXT_DIRECTORY: AtomicU64 = AtomicU64::new(0);
+
+/// Test-owned directory removed recursively when its test finishes.
+#[derive(Debug)]
+struct TestDirectory(PathBuf);
+
+impl TestDirectory {
+    /// Creates a unique directory under the operating system's temporary root.
+    fn new() -> Result<Self> {
+        let suffix = NEXT_DIRECTORY.fetch_add(1, Ordering::Relaxed);
+        let timestamp = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos();
+        let path = std::env::temp_dir().join(format!(
+            "nanalogue-adaptive-sampling-monitor-{}-{timestamp}-{suffix}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&path)?;
+        Ok(Self(path))
+    }
+
+    /// Returns the directory path for fixture construction.
+    fn path(&self) -> &Path {
+        &self.0
+    }
+}
+
+impl Drop for TestDirectory {
+    fn drop(&mut self) {
+        let _removed = fs::remove_dir_all(&self.0);
+    }
+}
 
 /// Two overlapping regions on chr1 and an independent region on chr2.
 fn regions() -> Result<Vec<Region>> {
@@ -39,7 +72,7 @@ fn poll(monitor: &mut Monitor) {
 /// New invalid BAM paths are reported and skipped without blocking valid files.
 #[test]
 fn skips_non_ascii_and_control_paths() -> Result<()> {
-    let directory = tempfile::tempdir()?;
+    let directory = TestDirectory::new()?;
     let good = "good\t0\tchr1\t101\t60\t3M\t*\t0\t0\tAAA\t*";
     write_bam(&directory.path().join("valid.bam"), &[good])?;
     let mut monitor = Monitor::new(directory.path().to_path_buf(), &regions()?);
@@ -75,7 +108,7 @@ fn skips_non_ascii_and_control_paths() -> Result<()> {
 /// Confirms half-open spans, reverse reads, CIGAR reference consumption and flags.
 #[test]
 fn primary_overlap_and_full_lengths() -> Result<()> {
-    let directory = tempfile::tempdir()?;
+    let directory = TestDirectory::new()?;
     let path = directory.path().join("reads.bam");
     write_bam(
         &path,
@@ -132,7 +165,7 @@ fn primary_overlap_and_full_lengths() -> Result<()> {
 /// Nanalogue intersections retain BED order, nested hits and absent-contig zeros.
 #[test]
 fn nested_half_open_overlaps() -> Result<()> {
-    let directory = tempfile::tempdir()?;
+    let directory = TestDirectory::new()?;
     let path = directory.path().join("reads.bam");
     let targets = crate::bed::parse(
         &b"chr1\t100\t200\tright\nchr1\t0\t1000\touter\nchr1\t20\t40\tinner\nabsent\t0\t100\tmissing\nchr2\t0\t100\tother\n"[..],
@@ -164,7 +197,7 @@ fn nested_half_open_overlaps() -> Result<()> {
 /// `CurrRead` validation must not be bypassed or allow a partial replacement.
 #[test]
 fn nanalogue_validation_retains_previous_contribution() -> Result<()> {
-    let directory = tempfile::tempdir()?;
+    let directory = TestDirectory::new()?;
     let path = directory.path().join("reads.bam");
     let good = "good\t0\tchr1\t101\t60\t3M\t*\t0\t0\tAAA\t*";
     write_bam(&path, &[good])?;
@@ -228,7 +261,7 @@ fn nanalogue_validation_retains_previous_contribution() -> Result<()> {
 /// Both pass and fail are included; temporary files and unchanged data are not.
 #[test]
 fn recursive_discovery_replacement_and_retry() -> Result<()> {
-    let directory = tempfile::tempdir()?;
+    let directory = TestDirectory::new()?;
     for child in [
         "bam_pass/barcode01",
         "bam_fail",
@@ -244,6 +277,8 @@ fn recursive_discovery_replacement_and_retry() -> Result<()> {
     let long = "long\t0\tchr1\t101\t60\t7M\t*\t0\t0\tAAAAAAA\t*";
     write_bam(&pass, &[short])?;
     write_bam(&fail, &[long, long])?;
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(&pass, directory.path().join("linked.bam"))?;
     for name in [
         "tmp/open.bam",
         "queued_reads/open.bam",
@@ -335,7 +370,7 @@ fn recursive_discovery_replacement_and_retry() -> Result<()> {
 /// Metadata checks independently detect timestamp changes and size changes.
 #[test]
 fn fingerprint_and_change_during_scan() -> Result<()> {
-    let directory = tempfile::tempdir()?;
+    let directory = TestDirectory::new()?;
     let path = directory.path().join("reads.bam");
     let read = "read\t0\tchr1\t101\t60\t3M\t*\t0\t0\tAAA\t*";
     write_bam(&path, &[read])?;
@@ -394,7 +429,7 @@ fn fingerprint_and_change_during_scan() -> Result<()> {
 /// Cancellation discards an in-progress scan rather than publishing partial data.
 #[test]
 fn cancelled_scan_is_not_accepted() -> Result<()> {
-    let directory = tempfile::tempdir()?;
+    let directory = TestDirectory::new()?;
     let path = directory.path().join("reads.bam");
     write_bam(&path, &["read\t0\tchr1\t101\t60\t3M\t*\t0\t0\tAAA\t*"])?;
     let error = scan(&path, &regions()?, &AtomicBool::new(true))

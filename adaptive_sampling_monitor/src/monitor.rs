@@ -1,19 +1,19 @@
 //! Recursive BAM discovery and transactional per-file statistics replacement.
 
 use std::collections::BTreeMap;
+use std::ffi::OsStr;
 use std::fs;
 use std::io::{Read as _, Seek as _, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Instant, SystemTime};
 
-use anyhow::{Context as _, Result, ensure};
 use nanalogue_core::bedrs::Intersect as _;
 use nanalogue_core::{CurrRead, GenomicBed3, GenomicStrandedBed3, ReadState, nanalogue_bam_reader};
 use rust_htslib::bam::Read as _;
-use walkdir::{DirEntry, WalkDir};
 
 use crate::bed::Region;
+use crate::error::{Context as _, Result, ensure};
 
 /// Exact sufficient statistics; means are computed only for display.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
@@ -146,43 +146,8 @@ impl Monitor {
         "Discovering BAM files".clone_into(&mut self.snapshot.activity);
         publish(&self.snapshot);
         let mut candidates = Vec::new();
-        for result in WalkDir::new(&self.directory)
-            .follow_links(false)
-            .into_iter()
-            .filter_entry(eligible_entry)
-        {
-            if stop.load(Ordering::Relaxed) {
-                return;
-            }
-            match result {
-                Ok(entry) if entry.file_type().is_dir() || entry.file_type().is_symlink() => {}
-                Ok(entry) => {
-                    let path = entry.path();
-                    if path
-                        .extension()
-                        .is_some_and(|extension| extension.eq_ignore_ascii_case("bam"))
-                    {
-                        if let Err(error) = crate::text::check_path(path) {
-                            self.defer(error.to_string());
-                            continue;
-                        }
-                        match Fingerprint::read(path) {
-                            Ok(before) => {
-                                if !self
-                                    .files
-                                    .get(path)
-                                    .is_some_and(|old| old.fingerprint == before)
-                                {
-                                    candidates.push((path.to_path_buf(), before));
-                                }
-                            }
-                            Err(error) => self.defer(format!("{}: {error:#}", path.display())),
-                        }
-                    }
-                }
-                Err(error) => self.defer(error.to_string()),
-            }
-        }
+        let directory = self.directory.clone();
+        self.discover(&directory, stop, &mut candidates);
         candidates.sort_by(|left, right| left.0.cmp(&right.0));
         self.snapshot.pending = self.snapshot.pending.saturating_add(candidates.len());
         for (path, before) in candidates {
@@ -196,13 +161,81 @@ impl Monitor {
             match result {
                 Ok(()) => self.snapshot.pending = self.snapshot.pending.saturating_sub(1),
                 Err(error) => {
-                    self.snapshot.warning = Some(format!("{}: {error:#}", path.display()));
+                    self.snapshot.warning = Some(format!("{}: {error}", path.display()));
                 }
             }
             publish(&self.snapshot);
         }
         "Watching; checking for changes every 60s".clone_into(&mut self.snapshot.activity);
         publish(&self.snapshot);
+    }
+
+    /// Recurses through eligible directories without following symbolic links.
+    fn discover(
+        &mut self,
+        directory: &Path,
+        stop: &AtomicBool,
+        candidates: &mut Vec<(PathBuf, Fingerprint)>,
+    ) {
+        let entries = match fs::read_dir(directory) {
+            Ok(entries) => entries,
+            Err(error) => {
+                self.defer(format!("{}: {error}", directory.display()));
+                return;
+            }
+        };
+        for result in entries {
+            if stop.load(Ordering::Relaxed) {
+                return;
+            }
+            let entry = match result {
+                Ok(entry) => entry,
+                Err(error) => {
+                    self.defer(format!("{}: {error}", directory.display()));
+                    continue;
+                }
+            };
+            if !eligible_name(&entry.file_name()) {
+                continue;
+            }
+            let path = entry.path();
+            let file_type = match entry.file_type() {
+                Ok(file_type) => file_type,
+                Err(error) => {
+                    self.defer(format!("{}: {error}", path.display()));
+                    continue;
+                }
+            };
+            if file_type.is_symlink() {
+                continue;
+            }
+            if file_type.is_dir() {
+                self.discover(&path, stop, candidates);
+                continue;
+            }
+            if !path
+                .extension()
+                .is_some_and(|extension| extension.eq_ignore_ascii_case("bam"))
+            {
+                continue;
+            }
+            if let Err(error) = crate::text::check_path(&path) {
+                self.defer(error.to_string());
+                continue;
+            }
+            match Fingerprint::read(&path) {
+                Ok(before) => {
+                    if !self
+                        .files
+                        .get(&path)
+                        .is_some_and(|old| old.fingerprint == before)
+                    {
+                        candidates.push((path, before));
+                    }
+                }
+                Err(error) => self.defer(format!("{}: {error}", path.display())),
+            }
+        }
     }
 
     /// Records a discovery error without stopping other files from progressing.
@@ -213,10 +246,10 @@ impl Monitor {
 
     /// Commits metadata and totals together, only if the scan's input is stable.
     fn accept(&mut self, path: &Path, before: Fingerprint, stats: Vec<Stats>) -> Result<()> {
-        ensure!(
+        ensure(
             Fingerprint::read(path)? == before,
-            "file changed while scanning; retrying next minute"
-        );
+            "file changed while scanning; retrying next minute",
+        )?;
         let old = self.files.get(path);
         let mut totals = Vec::with_capacity(stats.len());
         for (index, (total, new)) in self.snapshot.stats.iter().zip(&stats).enumerate() {
@@ -245,11 +278,8 @@ impl Monitor {
     clippy::case_sensitive_file_extension_comparisons,
     reason = "The filename is converted to ASCII lowercase before suffix comparisons"
 )]
-fn eligible_entry(entry: &DirEntry) -> bool {
-    if entry.depth() == 0 {
-        return true;
-    }
-    let name = entry.file_name().to_string_lossy().to_ascii_lowercase();
+fn eligible_name(file_name: &OsStr) -> bool {
+    let name = file_name.to_string_lossy().to_ascii_lowercase();
     !name.starts_with('.')
         && !matches!(name.as_str(), "tmp" | "temp" | "queued_reads")
         && !name.ends_with(".tmp")
@@ -264,10 +294,10 @@ fn eligible_entry(entry: &DirEntry) -> bool {
 fn scan(path: &Path, regions: &[Region], stop: &AtomicBool) -> Result<Vec<Stats>> {
     check_eof(path)?;
     let mut reader = nanalogue_bam_reader(path)?;
-    ensure!(
+    ensure(
         reader.header().target_count() > 0,
-        "BAM has no reference sequences; enable MinKNOW output alignment"
-    );
+        "BAM has no reference sequences; enable MinKNOW output alignment",
+    )?;
     // An absent contig contributes zero; numeric target IDs are local to each BAM.
     let targets = regions
         .iter()
@@ -287,7 +317,7 @@ fn scan(path: &Path, regions: &[Region], stop: &AtomicBool) -> Result<Vec<Stats>
         .collect::<Result<Vec<_>>>()?;
     let mut stats = vec![Stats::default(); regions.len()];
     for result in reader.records() {
-        ensure!(!stop.load(Ordering::Relaxed), "scan cancelled");
+        ensure(!stop.load(Ordering::Relaxed), "scan cancelled")?;
         let record = result?;
         let read = CurrRead::default().set_read_state_and_id(&record)?;
         if !matches!(
@@ -326,7 +356,7 @@ fn check_eof(path: &Path) -> Result<()> {
         .context("BAM is incomplete: missing end marker")?;
     let mut trailer = [0; 28];
     file.read_exact(&mut trailer)?;
-    ensure!(trailer == EOF, "BAM is incomplete: missing end marker");
+    ensure(trailer == EOF, "BAM is incomplete: missing end marker")?;
     Ok(())
 }
 

@@ -10,10 +10,7 @@ repository = "https://github.com/sathish-t/nanalogue-sak"
 [workspace.dependencies]
 nanalogue = { git = "https://github.com/DNAReplicationLab/nanalogue.git", rev = "18d5fdf01ad538346c2a5970996813df24acd788" }
 rust-htslib = { version = "=1.0.0", features = ["libdeflate"] }
-anyhow = "1"
 crossterm = "0.29"
-walkdir = "2"
-tempfile = "3"
 
 # Copied without changes from DNAReplicationLab/nanalogue Cargo.toml at
 # 18d5fdf01ad538346c2a5970996813df24acd788. Every member must inherit these.

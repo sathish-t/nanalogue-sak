@@ -3,8 +3,7 @@
 use std::collections::BTreeSet;
 use std::io::BufRead;
 
-use anyhow::{Context as _, Result, ensure};
-
+use crate::error::{Context as _, Result, ensure, message};
 use crate::text::is_printable_ascii;
 
 /// A named BED interval, retained in input order for display.
@@ -40,7 +39,9 @@ pub(crate) fn parse<R: BufRead>(reader: R) -> Result<Vec<Region>> {
         }
         let fields: Vec<&str> = line.split('\t').collect();
         let &[contig, start_text, end_text, name, ..] = fields.as_slice() else {
-            anyhow::bail!("BED line {line_number}: expected at least four tab-separated columns");
+            return Err(message(format!(
+                "BED line {line_number}: expected at least four tab-separated columns"
+            )));
         };
         let start: i64 = start_text
             .parse()
@@ -48,26 +49,26 @@ pub(crate) fn parse<R: BufRead>(reader: R) -> Result<Vec<Region>> {
         let end: i64 = end_text
             .parse()
             .with_context(|| format!("BED line {line_number}: invalid end"))?;
-        ensure!(
+        ensure(
             start >= 0 && end > start,
-            "BED line {line_number}: require 0 <= start < end"
-        );
-        ensure!(
+            format!("BED line {line_number}: require 0 <= start < end"),
+        )?;
+        ensure(
             !contig.trim().is_empty() && is_printable_ascii(contig),
-            "BED line {line_number}: invalid contig; require nonempty printable ASCII"
-        );
-        ensure!(
+            format!("BED line {line_number}: invalid contig; require nonempty printable ASCII"),
+        )?;
+        ensure(
             !name.trim().is_empty() && is_printable_ascii(name),
-            "BED line {line_number}: invalid or empty name; require printable ASCII"
-        );
-        ensure!(
+            format!("BED line {line_number}: invalid or empty name; require printable ASCII"),
+        )?;
+        ensure(
             name.len() <= 40,
-            "BED line {line_number}: name exceeds 40 characters"
-        );
-        ensure!(
+            format!("BED line {line_number}: name exceeds 40 characters"),
+        )?;
+        ensure(
             names.insert(name.to_owned()),
-            "BED line {line_number}: duplicate name '{name}'"
-        );
+            format!("BED line {line_number}: duplicate name '{name}'"),
+        )?;
         regions.push(Region {
             contig: contig.to_owned(),
             start: u32::try_from(start)
@@ -77,7 +78,7 @@ pub(crate) fn parse<R: BufRead>(reader: R) -> Result<Vec<Region>> {
             name: name.to_owned(),
         });
     }
-    ensure!(!regions.is_empty(), "BED contains no regions");
+    ensure(!regions.is_empty(), "BED contains no regions")?;
     Ok(regions)
 }
 

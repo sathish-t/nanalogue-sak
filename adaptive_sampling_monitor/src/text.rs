@@ -2,7 +2,7 @@
 
 use std::path::Path;
 
-use anyhow::{Result, ensure};
+use crate::error::{Result, ensure};
 
 /// Spaces and visible ASCII are each exactly one terminal cell.
 pub(crate) fn is_printable_ascii(text: &str) -> bool {
@@ -24,11 +24,13 @@ pub(crate) fn escape(text: &str) -> String {
 
 /// Rejects non-ASCII and control bytes, including non-UTF-8 filenames.
 pub(crate) fn check_path(path: &Path) -> Result<()> {
-    ensure!(
+    ensure(
         path.to_str().is_some_and(is_printable_ascii),
-        "{}: path must contain only printable ASCII",
-        path.as_os_str().as_encoded_bytes().escape_ascii()
-    );
+        format!(
+            "{}: path must contain only printable ASCII",
+            path.as_os_str().as_encoded_bytes().escape_ascii()
+        ),
+    )?;
     Ok(())
 }
 

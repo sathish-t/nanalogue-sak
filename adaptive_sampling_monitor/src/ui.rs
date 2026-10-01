@@ -4,7 +4,6 @@ use std::io::{self, Write as _};
 use std::sync::mpsc::{Receiver, TryRecvError};
 use std::time::Duration;
 
-use anyhow::Result;
 use crossterm::cursor::{Hide, MoveTo, Show};
 use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
 use crossterm::style::{
@@ -17,6 +16,7 @@ use crossterm::terminal::{
 use crossterm::{execute, queue};
 
 use crate::bed::Region;
+use crate::error::{Result, message};
 use crate::monitor::{Snapshot, Stats};
 use crate::text::escape;
 
@@ -84,7 +84,9 @@ pub(crate) fn run(regions: &[Region], receiver: &Receiver<Snapshot>) -> Result<(
         match receiver.try_recv() {
             Ok(update) => snapshot = update,
             Err(TryRecvError::Empty) => {}
-            Err(TryRecvError::Disconnected) => anyhow::bail!("BAM worker stopped unexpectedly"),
+            Err(TryRecvError::Disconnected) => {
+                return Err(message("BAM worker stopped unexpectedly"));
+            }
         }
         let (width, height) = terminal::size()?;
         let visible = usize::from(height).saturating_sub(CHROME_ROWS).max(1);
@@ -393,7 +395,7 @@ fn frame(
 mod tests {
     //! Display scale, weighting and terminal-width regressions.
     use super::*;
-    use anyhow::Context as _;
+    use crate::error::Context as _;
 
     /// Projects styled runs to their plain terminal text without ANSI escapes.
     fn text(line: &Line) -> String {
