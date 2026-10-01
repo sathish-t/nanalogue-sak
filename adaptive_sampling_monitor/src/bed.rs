@@ -54,8 +54,10 @@ pub(crate) fn parse<R: BufRead>(reader: R) -> Result<Vec<Region>> {
             format!("BED line {line_number}: require 0 <= start < end"),
         )?;
         ensure(
-            !contig.trim().is_empty() && is_printable_ascii(contig),
-            format!("BED line {line_number}: invalid contig; require nonempty printable ASCII"),
+            !contig.is_empty() && contig == contig.trim() && is_printable_ascii(contig),
+            format!(
+                "BED line {line_number}: invalid contig; require nonempty printable ASCII without leading or trailing whitespace"
+            ),
         )?;
         ensure(
             !name.trim().is_empty() && is_printable_ascii(name),
@@ -137,6 +139,25 @@ mod tests {
             &b"track name=targets\n browser position chr1\n# comment\n\nchr1\t0\t10\ta\t0\t+\n"[..],
         )?;
         assert_eq!(regions.len(), 1, "only the BED record is retained");
+        Ok(())
+    }
+
+    /// Standard CRLF records work, but whitespace cannot silently alter a contig.
+    #[test]
+    fn crlf_and_contig_whitespace() -> Result<()> {
+        let regions = parse(&b"chr1\t0\t10\ttarget\r\n"[..])?;
+        assert_eq!(
+            regions.first().map(|region| region.name.as_str()),
+            Some("target"),
+            "CRLF is removed before parsing the BED4 name"
+        );
+        for input in [" chr1\t0\t10\tleading\n", "chr1 \t0\t10\ttrailing\n"] {
+            let error = parse(input.as_bytes()).expect_err("padded contig must be rejected");
+            assert!(
+                error.to_string().contains("leading or trailing whitespace"),
+                "contig whitespace has an actionable diagnostic: {error}"
+            );
+        }
         Ok(())
     }
 }

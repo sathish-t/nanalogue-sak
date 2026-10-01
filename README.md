@@ -46,8 +46,9 @@ This adds no validation of BAM read IDs beyond nanalogue's existing checks.
 
 - BED must contain at least four **tab-separated** columns. Names in column four
   must be nonempty printable ASCII, at most 40 characters and unique across the
-  entire file. Contig names must also be nonempty printable ASCII. Invalid labels
-  and duplicates are fatal startup errors with a line number.
+  entire file. Contig names must also be nonempty printable ASCII without leading
+  or trailing whitespace. Invalid labels and duplicates are fatal startup errors
+  with a line number.
   Coordinates must satisfy `0 <= start < end <= u32::MAX`,
   matching nanalogue's coordinate representation.
   Blank lines, `#` comments and `track`/`browser` metadata lines are ignored.
