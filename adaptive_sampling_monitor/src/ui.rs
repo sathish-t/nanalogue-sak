@@ -344,7 +344,7 @@ fn frame(
         .map(|region| region.name.len())
         .max()
         .unwrap_or(0)
-        .clamp(10, 24.min(columns.checked_div(4).unwrap_or(0)));
+        .clamp(10, 24.min(columns.checked_div(4).unwrap_or(0)).max(10));
     let annotation_width = snapshot
         .stats
         .iter()

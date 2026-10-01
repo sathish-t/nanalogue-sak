@@ -37,12 +37,12 @@ impl Stats {
                 .count
                 .checked_sub(old.count)
                 .and_then(|value| value.checked_add(new.count))
-                .context("read count overflow")?,
+                .context("read count arithmetic failed")?,
             bases: self
                 .bases
                 .checked_sub(old.bases)
                 .and_then(|value| value.checked_add(new.bases))
-                .context("base count overflow")?,
+                .context("base count arithmetic failed")?,
         })
     }
 }

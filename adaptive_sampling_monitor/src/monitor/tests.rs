@@ -440,6 +440,31 @@ fn parses_read_stats_report() -> Result<()> {
     Ok(())
 }
 
+/// Replacement arithmetic failures use neutral diagnostics for either operation.
+#[test]
+fn stats_replacement_arithmetic_diagnostics() {
+    let read_error = Stats { count: 0, bases: 0 }
+        .replace(Stats { count: 1, bases: 0 }, Stats::default())
+        .expect_err("subtracting a larger read count must fail");
+    assert_eq!(
+        read_error.to_string(),
+        "read count arithmetic failed",
+        "read arithmetic diagnostic does not misclassify the operation"
+    );
+
+    let base_error = Stats {
+        count: 0,
+        bases: u64::MAX,
+    }
+    .replace(Stats::default(), Stats { count: 0, bases: 1 })
+    .expect_err("adding beyond the base-count limit must fail");
+    assert_eq!(
+        base_error.to_string(),
+        "base count arithmetic failed",
+        "base arithmetic diagnostic does not misclassify the operation"
+    );
+}
+
 /// Both pass and fail are included; temporary files and unchanged data are not.
 #[test]
 fn recursive_discovery_replacement_and_retry() -> Result<()> {
