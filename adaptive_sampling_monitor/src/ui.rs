@@ -89,7 +89,7 @@ pub(crate) fn run(regions: &[Region], monitor: &mut Monitor) -> Result<()> {
 
         let now = Instant::now();
         if now >= next_poll {
-            monitor.refresh();
+            monitor.refresh()?;
             next_poll = Instant::now()
                 .checked_add(POLL_INTERVAL)
                 .unwrap_or_else(Instant::now);
@@ -120,7 +120,7 @@ pub(crate) fn run(regions: &[Region], monitor: &mut Monitor) -> Result<()> {
                 }
             }
         } else {
-            monitor.refresh();
+            monitor.refresh()?;
             next_poll = Instant::now()
                 .checked_add(POLL_INTERVAL)
                 .unwrap_or_else(Instant::now);

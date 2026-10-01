@@ -118,7 +118,7 @@ pub(crate) struct Monitor {
     directory: PathBuf,
     /// Named targets in BED order, resolved against each BAM's own header.
     regions: Vec<Region>,
-    /// Last accepted contributions, including files subsequently moved away.
+    /// Last accepted contributions, keyed by paths that must remain present.
     files: BTreeMap<PathBuf, Contribution>,
     /// Current global totals and processing status.
     snapshot: Snapshot,
@@ -136,7 +136,8 @@ impl Monitor {
     }
 
     /// Discovers changes and updates the display state while retaining good old data.
-    pub(crate) fn refresh(&mut self) {
+    pub(crate) fn refresh(&mut self) -> Result<()> {
+        self.ensure_processed_files_exist()?;
         self.snapshot.warning = None;
         self.snapshot.pending = 0;
         "Discovering BAM files".clone_into(&mut self.snapshot.activity);
@@ -156,11 +157,29 @@ impl Monitor {
             }
         }
         "Watching; checking for changes every 60s".clone_into(&mut self.snapshot.activity);
+        Ok(())
     }
 
     /// Returns the latest complete statistics and monitoring status.
     pub(crate) fn snapshot(&self) -> &Snapshot {
         &self.snapshot
+    }
+
+    /// Stops rather than double-counting a processed BAM that moved to a new path.
+    fn ensure_processed_files_exist(&self) -> Result<()> {
+        for path in self.files.keys() {
+            let exists = path
+                .try_exists()
+                .with_context(|| format!("checking processed BAM {}", path.display()))?;
+            ensure(
+                exists,
+                format!(
+                    "processed BAM disappeared; refusing to risk counting a moved file twice: {}",
+                    path.display()
+                ),
+            )?;
+        }
+        Ok(())
     }
 
     /// Recurses through eligible directories without following symbolic links.

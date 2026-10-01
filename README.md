@@ -114,9 +114,10 @@ contribution remains visible. A standard 28-byte BAM end marker is required;
 there are no content hashes or integrity guarantees. The status row shows the
 most recent problem in the current cycle.
 
-Totals are cumulative for this session: if a processed file disappears, its
-accepted contribution is retained. State is not persisted between launches.
-Memory usage includes a count and length sum for every file/region combination.
+If a processed file disappears, the monitor exits with an error rather than risk
+counting the same BAM again under a new path. State is not persisted between
+launches. Memory usage includes a count and length sum for every file/region
+combination.
 
 MinKNOW [documents temporary files being moved to final output folders](https://nanoporetech.com/support/software/MinKNOW/post-run-options/why-do-my-reads-end-up-in-the-pod5-skip-queued-reads-or-tmp-folder).
 The monitor therefore includes the newest finalised BAM rather than holding

@@ -65,8 +65,8 @@ fn write_bam(path: &Path, records: &[&str]) -> Result<()> {
 }
 
 /// Executes a refresh immediately; production schedules the next one at 60s.
-fn poll(monitor: &mut Monitor) {
-    monitor.refresh();
+fn poll(monitor: &mut Monitor) -> Result<()> {
+    monitor.refresh()
 }
 
 /// New invalid BAM paths are reported and skipped without blocking valid files.
@@ -76,13 +76,13 @@ fn skips_non_ascii_and_control_paths() -> Result<()> {
     let good = "good\t0\tchr1\t101\t60\t3M\t*\t0\t0\tAAA\t*";
     write_bam(&directory.path().join("valid.bam"), &[good])?;
     let mut monitor = Monitor::new(directory.path().to_path_buf(), &regions()?);
-    poll(&mut monitor);
+    poll(&mut monitor)?;
     for name in ["\u{e9}.bam", "bad\n.bam", "\u{754c}/reads.bam"] {
         let path = directory.path().join(name);
         fs::create_dir_all(path.parent().context("fixture parent")?)?;
         write_bam(&path, &[good, good])?;
     }
-    poll(&mut monitor);
+    poll(&mut monitor)?;
     assert_eq!(
         monitor.snapshot.processed, 1,
         "invalid files are never accepted"
@@ -138,7 +138,7 @@ fn primary_overlap_and_full_lengths() -> Result<()> {
         ],
     )?;
     let mut monitor = Monitor::new(directory.path().to_path_buf(), &regions()?);
-    poll(&mut monitor);
+    poll(&mut monitor)?;
     assert_eq!(
         monitor.snapshot.stats,
         vec![
@@ -202,7 +202,7 @@ fn nanalogue_validation_retains_previous_contribution() -> Result<()> {
     let good = "good\t0\tchr1\t101\t60\t3M\t*\t0\t0\tAAA\t*";
     write_bam(&path, &[good])?;
     let mut monitor = Monitor::new(directory.path().to_path_buf(), &regions()?);
-    poll(&mut monitor);
+    poll(&mut monitor)?;
     let accepted = monitor.snapshot.stats.clone();
     assert_eq!(
         accepted.first(),
@@ -228,7 +228,7 @@ fn nanalogue_validation_retains_previous_contribution() -> Result<()> {
         ),
     ] {
         write_bam(&path, &[good, good, invalid])?;
-        poll(&mut monitor);
+        poll(&mut monitor)?;
         assert_eq!(
             monitor.snapshot.stats, accepted,
             "no partial data replaces the accepted file"
@@ -245,7 +245,7 @@ fn nanalogue_validation_retains_previous_contribution() -> Result<()> {
         );
     }
     write_bam(&path, &[good, good])?;
-    poll(&mut monitor);
+    poll(&mut monitor)?;
     assert_eq!(
         monitor.snapshot.stats.first(),
         Some(&Stats { count: 2, bases: 6 }),
@@ -290,7 +290,7 @@ fn recursive_discovery_replacement_and_retry() -> Result<()> {
         fs::write(directory.path().join(name), b"not finished")?;
     }
     let mut monitor = Monitor::new(directory.path().to_path_buf(), &regions()?);
-    poll(&mut monitor);
+    poll(&mut monitor)?;
     assert_eq!(
         monitor.snapshot.stats.first(),
         Some(&Stats {
@@ -302,14 +302,14 @@ fn recursive_discovery_replacement_and_retry() -> Result<()> {
     assert_eq!(monitor.snapshot.processed, 2, "both final BAMs accepted");
     assert_eq!(monitor.snapshot.pending, 0, "temporary paths pruned");
     let updated = monitor.snapshot.updated;
-    poll(&mut monitor);
+    poll(&mut monitor)?;
     assert_eq!(
         monitor.snapshot.updated, updated,
         "unchanged files are not scanned twice"
     );
 
     write_bam(&pass, &[long, short, long])?;
-    poll(&mut monitor);
+    poll(&mut monitor)?;
     assert_eq!(
         monitor.snapshot.stats.first(),
         Some(&Stats {
@@ -325,7 +325,7 @@ fn recursive_discovery_replacement_and_retry() -> Result<()> {
         .write(true)
         .open(&pass)?
         .set_len(length.checked_sub(28).context("fixture too small")?)?;
-    poll(&mut monitor);
+    poll(&mut monitor)?;
     assert_eq!(
         monitor.snapshot.stats.first(),
         Some(&Stats {
@@ -350,7 +350,7 @@ fn recursive_discovery_replacement_and_retry() -> Result<()> {
     write_bam(&pass, &[short])?;
     let next = directory.path().join("bam_pass/barcode01/run_1.bam");
     write_bam(&next, &[long])?;
-    poll(&mut monitor);
+    poll(&mut monitor)?;
     assert_eq!(
         monitor.snapshot.stats.first(),
         Some(&Stats {
@@ -363,6 +363,32 @@ fn recursive_discovery_replacement_and_retry() -> Result<()> {
     assert!(
         monitor.snapshot.warning.is_none(),
         "successful retry clears warning"
+    );
+    Ok(())
+}
+
+/// Moving an accepted BAM is fatal before its new path can count a second time.
+#[test]
+fn renamed_processed_file_is_fatal() -> Result<()> {
+    let directory = TestDirectory::new()?;
+    let original = directory.path().join("original.bam");
+    let moved = directory.path().join("moved.bam");
+    write_bam(&original, &["read\t0\tchr1\t101\t60\t3M\t*\t0\t0\tAAA\t*"])?;
+    let mut monitor = Monitor::new(directory.path().to_path_buf(), &regions()?);
+    poll(&mut monitor)?;
+    let accepted = monitor.snapshot.stats.clone();
+
+    fs::rename(&original, &moved)?;
+    let error = monitor
+        .refresh()
+        .expect_err("a missing processed path must stop the monitor");
+    assert!(
+        error.to_string().contains("processed BAM disappeared"),
+        "fatal error explains the missing accepted input: {error}"
+    );
+    assert_eq!(
+        monitor.snapshot.stats, accepted,
+        "moved copy is not added under its new path"
     );
     Ok(())
 }
@@ -388,7 +414,7 @@ fn fingerprint_and_change_during_scan() -> Result<()> {
     assert_ne!(initial, touched, "timestamp alone detects a change");
 
     let mut monitor = Monitor::new(directory.path().to_path_buf(), &regions()?);
-    poll(&mut monitor);
+    poll(&mut monitor)?;
     let accepted = monitor.snapshot.stats.clone();
     let before = Fingerprint::read(&path)?;
     let scanned = scan(&path, &monitor.regions)?;
@@ -417,7 +443,7 @@ fn fingerprint_and_change_during_scan() -> Result<()> {
         monitor.snapshot.stats, accepted,
         "failed commit leaves all totals intact"
     );
-    poll(&mut monitor);
+    poll(&mut monitor)?;
     assert_eq!(
         monitor.snapshot.stats.first(),
         Some(&Stats { count: 3, bases: 9 }),
