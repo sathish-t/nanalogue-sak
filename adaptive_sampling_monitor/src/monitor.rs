@@ -4,6 +4,7 @@ use std::collections::BTreeMap;
 use std::ffi::OsStr;
 use std::fs;
 use std::io::{Read as _, Seek as _, SeekFrom};
+use std::ops::ControlFlow;
 use std::path::{Path, PathBuf};
 use std::str;
 use std::time::SystemTime;
@@ -127,18 +128,25 @@ impl Monitor {
         }
     }
 
-    /// Discovers changes and updates the display state while retaining good old data.
-    pub(crate) fn refresh(&mut self) -> Result<()> {
+    /// Discovers changes, reporting cooperative UI checkpoints during synchronous scans.
+    pub(crate) fn refresh<F>(&mut self, mut progress: F) -> Result<ControlFlow<()>>
+    where
+        F: FnMut(&Snapshot) -> Result<ControlFlow<()>>,
+    {
         self.ensure_processed_files_exist()?;
         self.snapshot.warning = None;
         self.snapshot.pending = 0;
         "Discovering BAM files".clone_into(&mut self.snapshot.activity);
+        if progress(&self.snapshot)?.is_break() {
+            return Ok(ControlFlow::Break(()));
+        }
         let mut candidates = Vec::new();
         let directory = self.directory.clone();
         self.discover(&directory, &mut candidates);
         candidates.sort_by(|left, right| left.0.cmp(&right.0));
         self.snapshot.pending = self.snapshot.pending.saturating_add(candidates.len());
-        for (path, before) in candidates {
+        let candidate_count = candidates.len();
+        for (index, (path, before)) in candidates.into_iter().enumerate() {
             ensure(
                 before.bam_size <= MAX_BAM_BYTES,
                 format!(
@@ -147,23 +155,33 @@ impl Monitor {
                     path.display()
                 ),
             )?;
+            self.snapshot.activity = format!(
+                "Scanning BAM {}/{}: {}",
+                index.saturating_add(1),
+                candidate_count,
+                path.display()
+            );
+            if progress(&self.snapshot)?.is_break() {
+                return Ok(ControlFlow::Break(()));
+            }
+
             let result =
                 scan(&path, &self.regions).and_then(|stats| self.accept(&path, before, stats));
-            match result {
-                Ok(()) => {
-                    self.snapshot.pending = self
-                        .snapshot
-                        .pending
-                        .checked_sub(1)
-                        .context("pending BAM count underflow")?;
-                }
-                Err(error) => {
-                    self.snapshot.warning = Some(format!("{}: {error}", path.display()));
-                }
+            if let Err(error) = result {
+                self.snapshot.warning = Some(format!("{}: {error}", path.display()));
+            } else {
+                self.snapshot.pending = self
+                    .snapshot
+                    .pending
+                    .checked_sub(1)
+                    .context("pending BAM count underflow")?;
+            }
+            if progress(&self.snapshot)?.is_break() {
+                return Ok(ControlFlow::Break(()));
             }
         }
         "Watching; checking for changes every 60s".clone_into(&mut self.snapshot.activity);
-        Ok(())
+        Ok(ControlFlow::Continue(()))
     }
 
     /// Returns the latest complete statistics and monitoring status.

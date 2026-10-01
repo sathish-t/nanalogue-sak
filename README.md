@@ -99,10 +99,10 @@ around nanalogue's public API; read filtering and statistics belong to nanalogue
 ### File monitoring
 
 Existing BAMs are scanned at startup. After each scan cycle, the monitor waits
-**60 seconds** before checking recursively for new or changed files. Scanning is
-synchronous, so keyboard input and redraws pause while BAMs are being processed.
-Point at `bam_pass` for passing reads only, or a parent directory to include both
-pass and fail outputs and barcode subdirectories.
+**60 seconds** before checking recursively for new or changed files. Scanning
+remains synchronous, but the display refreshes and handles navigation, `q` and
+Ctrl-C between files. Point at `bam_pass` for passing reads only, or a parent
+directory to include both pass and fail outputs and barcode subdirectories.
 
 Hidden entries, `tmp`, `temp`, `queued_reads`, and names ending in `.tmp`,
 `.partial`, `.part`, `.tmp.bam`, `.partial.bam` or `.part.bam` are skipped below

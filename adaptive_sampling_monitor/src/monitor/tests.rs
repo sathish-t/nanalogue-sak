@@ -78,7 +78,11 @@ fn write_bam_with_index(path: &Path, records: &[&str], index_type: bam::index::T
 
 /// Executes a refresh immediately; production schedules the next one at 60s.
 fn poll(monitor: &mut Monitor) -> Result<()> {
-    monitor.refresh()
+    let outcome = monitor.refresh(|_| Ok(ControlFlow::Continue(())))?;
+    ensure(
+        outcome.is_continue(),
+        "test refresh was unexpectedly interrupted",
+    )
 }
 
 /// New invalid BAM paths are reported and skipped without blocking valid files.
@@ -238,6 +242,45 @@ fn read_stats_primary_filter_replaces_contribution() -> Result<()> {
     Ok(())
 }
 
+/// Cooperative interruption leaves a discovered BAM wholly unaccepted.
+#[test]
+fn refresh_can_stop_before_scanning_a_file() -> Result<()> {
+    let directory = TestDirectory::new()?;
+    let path = directory.path().join("reads.bam");
+    write_bam(&path, &["read\t0\tchr1\t101\t60\t3M\t*\t0\t0\tAAA\t*"])?;
+    let mut monitor = Monitor::new(directory.path().to_path_buf(), &regions()?);
+    let mut saw_discovery = false;
+    let mut saw_scan = false;
+    let outcome = monitor.refresh(|snapshot| {
+        saw_discovery |= snapshot.activity == "Discovering BAM files";
+        if snapshot.activity.starts_with("Scanning BAM 1/1: ") {
+            saw_scan = true;
+            Ok(ControlFlow::Break(()))
+        } else {
+            Ok(ControlFlow::Continue(()))
+        }
+    })?;
+    assert!(outcome.is_break(), "refresh propagates the quit request");
+    assert!(
+        saw_discovery && saw_scan,
+        "discovery and scan states are visible"
+    );
+    assert_eq!(
+        monitor.snapshot.processed, 0,
+        "interrupted BAM is not accepted"
+    );
+    assert_eq!(
+        monitor.snapshot.pending, 1,
+        "interrupted BAM remains pending"
+    );
+    assert_eq!(
+        monitor.snapshot.stats.first(),
+        Some(&Stats::default()),
+        "interrupted BAM contributes no partial statistics"
+    );
+    Ok(())
+}
+
 /// MinKNOW-style indexed input is required rather than silently scanning the BAM.
 #[test]
 fn missing_index_remains_pending() -> Result<()> {
@@ -359,13 +402,13 @@ fn oversized_bam_is_fatal() -> Result<()> {
         .open(&path)?
         .set_len(MAX_BAM_BYTES)?;
     let mut monitor = Monitor::new(directory.path().to_path_buf(), &regions()?);
-    monitor.refresh()?;
+    let _completed = monitor.refresh(|_| Ok(ControlFlow::Continue(())))?;
     File::options()
         .write(true)
         .open(&path)?
         .set_len(MAX_BAM_BYTES.checked_add(1).context("size overflow")?)?;
     let error = monitor
-        .refresh()
+        .refresh(|_| Ok(ControlFlow::Continue(())))
         .expect_err("BAM above 5 GB must stop the monitor");
     assert!(
         error
@@ -519,7 +562,7 @@ fn renamed_processed_file_is_fatal() -> Result<()> {
 
     fs::rename(&original, &moved)?;
     let error = monitor
-        .refresh()
+        .refresh(|_| Ok(ControlFlow::Continue(())))
         .expect_err("a missing processed path must stop the monitor");
     assert!(
         error.to_string().contains("processed BAM disappeared"),

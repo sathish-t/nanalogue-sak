@@ -1,6 +1,7 @@
 //! Crossterm screen lifecycle, logarithmic bars and keyboard navigation.
 
 use std::io::{self, Write as _};
+use std::ops::ControlFlow;
 use std::time::{Duration, Instant};
 
 use crossterm::cursor::{Hide, MoveTo, Show};
@@ -76,55 +77,87 @@ impl Drop for TerminalGuard {
     }
 }
 
+/// Draws the current snapshot and returns the number of visible region rows.
+fn redraw(regions: &[Region], snapshot: &Snapshot, offset: &mut usize) -> Result<usize> {
+    let (width, height) = terminal::size()?;
+    let visible = usize::from(height).saturating_sub(CHROME_ROWS).max(1);
+    *offset = (*offset).min(regions.len().saturating_sub(visible));
+    draw(&frame(regions, snapshot, *offset, width, height))?;
+    Ok(visible)
+}
+
+/// Applies one terminal event identically while waiting or scanning.
+#[expect(
+    clippy::needless_pass_by_value,
+    reason = "event::read returns an owned event that this handler consumes"
+)]
+fn handle_event(
+    input: Event,
+    offset: &mut usize,
+    visible: usize,
+    region_count: usize,
+) -> ControlFlow<()> {
+    let Event::Key(key) = input else {
+        return ControlFlow::Continue(());
+    };
+    if key.kind == KeyEventKind::Release {
+        return ControlFlow::Continue(());
+    }
+    #[expect(
+        clippy::wildcard_enum_match_arm,
+        reason = "KeyCode is non-exhaustive and unhandled keys intentionally do nothing"
+    )]
+    match key.code {
+        KeyCode::Char('q') => return ControlFlow::Break(()),
+        KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            return ControlFlow::Break(());
+        }
+        KeyCode::Down | KeyCode::Char('j') => *offset = offset.saturating_add(1),
+        KeyCode::Up | KeyCode::Char('k') => *offset = offset.saturating_sub(1),
+        KeyCode::PageDown => *offset = offset.saturating_add(visible),
+        KeyCode::PageUp => *offset = offset.saturating_sub(visible),
+        KeyCode::Home => *offset = 0,
+        KeyCode::End => *offset = region_count.saturating_sub(visible),
+        _ => {}
+    }
+    ControlFlow::Continue(())
+}
+
 /// Draws after input events and scans synchronously once per poll interval.
 pub(crate) fn run(regions: &[Region], monitor: &mut Monitor) -> Result<()> {
     let _terminal = TerminalGuard::enter()?;
     let mut offset: usize = 0;
     let mut next_poll = Instant::now();
     loop {
-        let (width, height) = terminal::size()?;
-        let visible = usize::from(height).saturating_sub(CHROME_ROWS).max(1);
-        offset = offset.min(regions.len().saturating_sub(visible));
-        draw(&frame(regions, monitor.snapshot(), offset, width, height))?;
+        let visible = redraw(regions, monitor.snapshot(), &mut offset)?;
 
         let now = Instant::now();
-        if now >= next_poll {
-            monitor.refresh()?;
-            next_poll = Instant::now()
-                .checked_add(POLL_INTERVAL)
-                .unwrap_or_else(Instant::now);
+        if now < next_poll && event::poll(next_poll.saturating_duration_since(now))? {
+            if handle_event(event::read()?, &mut offset, visible, regions.len()).is_break() {
+                break;
+            }
             continue;
         }
-        if event::poll(next_poll.saturating_duration_since(now))? {
-            if let Event::Key(key) = event::read()?
-                && key.kind != KeyEventKind::Release
-            {
-                #[expect(
-                    clippy::wildcard_enum_match_arm,
-                    reason = "KeyCode is non-exhaustive and unhandled keys intentionally do nothing"
-                )]
-                match key.code {
-                    KeyCode::Char('q') => break,
-                    KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => break,
-                    KeyCode::Down | KeyCode::Char('j') => {
-                        offset = offset.saturating_add(1);
-                    }
-                    KeyCode::Up | KeyCode::Char('k') => {
-                        offset = offset.saturating_sub(1);
-                    }
-                    KeyCode::PageDown => offset = offset.saturating_add(visible),
-                    KeyCode::PageUp => offset = offset.saturating_sub(visible),
-                    KeyCode::Home => offset = 0,
-                    KeyCode::End => offset = regions.len().saturating_sub(visible),
-                    _ => {}
-                }
+
+        let outcome = monitor.refresh(|snapshot| {
+            let progress_visible = redraw(regions, snapshot, &mut offset)?;
+            if event::poll(Duration::ZERO)? {
+                Ok(handle_event(
+                    event::read()?,
+                    &mut offset,
+                    progress_visible,
+                    regions.len(),
+                ))
+            } else {
+                Ok(ControlFlow::Continue(()))
             }
-        } else {
-            monitor.refresh()?;
-            next_poll = Instant::now()
-                .checked_add(POLL_INTERVAL)
-                .unwrap_or_else(Instant::now);
+        })?;
+        if outcome.is_break() {
+            break;
         }
+        next_poll = Instant::now()
+            .checked_add(POLL_INTERVAL)
+            .unwrap_or_else(Instant::now);
     }
     Ok(())
 }
@@ -405,6 +438,43 @@ mod tests {
     /// Projects styled runs to their plain terminal text without ANSI escapes.
     fn text(line: &Line) -> String {
         line.iter().map(|span| span.content().as_str()).collect()
+    }
+
+    /// Waiting and scanning share quit and navigation event behavior.
+    #[test]
+    fn shared_event_handler_quits_and_navigates() {
+        let mut offset = 2;
+        assert!(
+            handle_event(
+                Event::Key(event::KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE,)),
+                &mut offset,
+                3,
+                10,
+            )
+            .is_break(),
+            "q quits"
+        );
+        assert!(
+            handle_event(
+                Event::Key(event::KeyEvent::new(
+                    KeyCode::Char('c'),
+                    KeyModifiers::CONTROL,
+                )),
+                &mut offset,
+                3,
+                10,
+            )
+            .is_break(),
+            "Ctrl-C quits"
+        );
+        let outcome = handle_event(
+            Event::Key(event::KeyEvent::new(KeyCode::PageDown, KeyModifiers::NONE)),
+            &mut offset,
+            3,
+            10,
+        );
+        assert!(outcome.is_continue(), "navigation continues monitoring");
+        assert_eq!(offset, 5, "page navigation uses the visible row count");
     }
 
     /// Zero and singleton counts must not disappear into the same log position.
