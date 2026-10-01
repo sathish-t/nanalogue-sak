@@ -1,0 +1,141 @@
+//! BED4 validation with unique display names and nanalogue-compatible coordinates.
+
+use std::collections::BTreeSet;
+use std::io::BufRead;
+
+use anyhow::{Context as _, Result, ensure};
+
+use crate::text::is_printable_ascii;
+
+/// A named BED interval, retained in input order for display.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Region {
+    /// Reference sequence name, matched exactly to BAM target names.
+    pub contig: String,
+    /// Inclusive zero-based reference coordinate.
+    pub start: u32,
+    /// Exclusive reference coordinate.
+    pub end: u32,
+    /// Unique fourth-column display label.
+    pub name: String,
+}
+
+/// Parses BED4+, accepting blank, comment, track and browser lines.
+///
+/// Rejects empty intervals, negative coordinates, duplicate/empty labels and
+/// control characters that could otherwise inject commands into the terminal.
+pub(crate) fn parse<R: BufRead>(reader: R) -> Result<Vec<Region>> {
+    let mut regions = Vec::new();
+    let mut names = BTreeSet::new();
+    for (offset, result) in reader.lines().enumerate() {
+        let line_number = offset.saturating_add(1);
+        let line = result.with_context(|| format!("reading BED line {line_number}"))?;
+        let trimmed = line.trim();
+        if trimmed.is_empty()
+            || trimmed.starts_with('#')
+            || trimmed.starts_with("track ")
+            || trimmed.starts_with("browser ")
+        {
+            continue;
+        }
+        let fields: Vec<&str> = line.split('\t').collect();
+        let &[contig, start_text, end_text, name, ..] = fields.as_slice() else {
+            anyhow::bail!("BED line {line_number}: expected at least four tab-separated columns");
+        };
+        let start: i64 = start_text
+            .parse()
+            .with_context(|| format!("BED line {line_number}: invalid start"))?;
+        let end: i64 = end_text
+            .parse()
+            .with_context(|| format!("BED line {line_number}: invalid end"))?;
+        ensure!(
+            start >= 0 && end > start,
+            "BED line {line_number}: require 0 <= start < end"
+        );
+        ensure!(
+            !contig.trim().is_empty() && is_printable_ascii(contig),
+            "BED line {line_number}: invalid contig; require nonempty printable ASCII"
+        );
+        ensure!(
+            !name.trim().is_empty() && is_printable_ascii(name),
+            "BED line {line_number}: invalid or empty name; require printable ASCII"
+        );
+        ensure!(
+            name.len() <= 40,
+            "BED line {line_number}: name exceeds 40 characters"
+        );
+        ensure!(
+            names.insert(name.to_owned()),
+            "BED line {line_number}: duplicate name '{name}'"
+        );
+        regions.push(Region {
+            contig: contig.to_owned(),
+            start: u32::try_from(start)
+                .with_context(|| format!("BED line {line_number}: start exceeds u32::MAX"))?,
+            end: u32::try_from(end)
+                .with_context(|| format!("BED line {line_number}: end exceeds u32::MAX"))?,
+            name: name.to_owned(),
+        });
+    }
+    ensure!(!regions.is_empty(), "BED contains no regions");
+    Ok(regions)
+}
+
+#[cfg(test)]
+mod tests {
+    //! Boundary and input validation tests.
+    use super::*;
+
+    /// Duplicate labels and malformed BED records fail before monitoring starts.
+    #[test]
+    fn rejects_invalid_input() {
+        for (input, expected) in [
+            ("chr1\t0\t20\n", "four tab-separated"),
+            ("chr1\t0\t20\ta\nchr2\t3\t4\ta\n", "duplicate name 'a'"),
+            ("chr1\t-1\t20\ta\n", "0 <= start < end"),
+            ("chr1\t20\t20\ta\n", "0 <= start < end"),
+            ("chr1\t0\t4294967296\ta\n", "end exceeds u32::MAX"),
+            ("chr1\t0\t20\t\n", "empty name"),
+            ("chr1\t0\t20\t\u{1b}[31m\n", "invalid or empty name"),
+            ("chr1\t0\t20\t\u{e9}\n", "printable ASCII"),
+            ("chr1\t0\t20\ta\u{7f}\n", "printable ASCII"),
+            ("chr\u{754c}\t0\t20\ta\n", "invalid contig"),
+            ("# comment\n", "no regions"),
+        ] {
+            let error = parse(input.as_bytes()).expect_err("invalid BED must be rejected");
+            assert!(
+                error.to_string().contains(expected),
+                "expected {expected}, got {error}"
+            );
+        }
+    }
+
+    /// Forty printable characters are accepted; the next character is rejected.
+    #[test]
+    fn label_length_boundary() -> Result<()> {
+        let name = "A".repeat(40);
+        let accepted = parse(format!("chr1\t0\t10\t{name}\n").as_bytes())?;
+        assert_eq!(
+            accepted.first().map(|region| &region.name),
+            Some(&name),
+            "40-character label retained"
+        );
+        let error = parse(format!("chr1\t0\t10\t{name}B\n").as_bytes())
+            .expect_err("41-character label rejected");
+        assert!(
+            error.to_string().contains("exceeds 40"),
+            "clear length error"
+        );
+        Ok(())
+    }
+
+    /// Metadata lines and columns after the label do not become regions.
+    #[test]
+    fn accepts_metadata_and_extra_columns() -> Result<()> {
+        let regions = parse(
+            &b"track name=targets\n browser position chr1\n# comment\n\nchr1\t0\t10\ta\t0\t+\n"[..],
+        )?;
+        assert_eq!(regions.len(), 1, "only the BED record is retained");
+        Ok(())
+    }
+}
