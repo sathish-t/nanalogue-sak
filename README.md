@@ -58,7 +58,8 @@ This adds no validation of BAM read IDs beyond nanalogue's existing checks.
   exactly (`chr1` and `1` are different). MinKNOW output alignment needs to be
   enabled separately; adaptive sampling alone should not be assumed to supply it.
   A BAM without reference sequences is reported as pending with an explanation.
-  Each `file.bam` must have the `file.bam.bai` index produced alongside MinKNOW's
+  Each BAM must have an adjacent BAI or CSI index using a standard filename that
+  HTSlib can discover. MinKNOW produces an index alongside its
   [aligned BAM output](https://software-docs.nanoporetech.com/output-specifications/26.01/read_formats/bam/).
   BAMs larger than 5 GB (5,000,000,000 bytes) are fatal input errors because this
   real-time monitor expects smaller batches; decrease MinKNOW's output batching
@@ -108,11 +109,11 @@ Hidden entries, `tmp`, `temp`, `queued_reads`, and names ending in `.tmp`,
 the supplied directory. Symlink entries are not followed. Use a final-output
 directory rather than explicitly selecting a temporary directory as the root.
 
-Each successfully processed path retains the size and modification timestamp of
-both its BAM and BAI, plus per-region counts and reconstructed length totals. If
-either file's metadata changes, a new scan **replaces** its previous contribution;
-it never adds the same file twice. Results are accepted only after a successful
-scan and matching before/after metadata for both files.
+Each successfully processed path retains the BAM's size and modification
+timestamp, plus per-region counts and reconstructed length totals. If the BAM's
+metadata changes, a new scan **replaces** its previous contribution; it never
+adds the same file twice. Results are accepted only after a successful scan and
+matching before/after BAM metadata. HTSlib discovers and loads the index.
 Incomplete/unreadable files are retried next cycle while their last accepted
 contribution remains visible. A standard 28-byte BAM end marker is required;
 there are no content hashes or integrity guarantees. The status row shows the

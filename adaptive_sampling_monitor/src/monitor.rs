@@ -53,24 +53,15 @@ struct Fingerprint {
     bam_size: u64,
     /// BAM modification time at the filesystem's highest exposed resolution.
     bam_modified: SystemTime,
-    /// BAI size in bytes.
-    bai_size: u64,
-    /// BAI modification time at the filesystem's highest exposed resolution.
-    bai_modified: SystemTime,
 }
 
 impl Fingerprint {
-    /// Reads BAM and MinKNOW-style `.bam.bai` metadata around each scan.
+    /// Reads BAM metadata around each scan; `HTSlib` owns index discovery.
     fn read(path: &Path) -> Result<Self> {
         let metadata = fs::metadata(path)?;
-        let index_path = path.with_extension("bam.bai");
-        let index_metadata = fs::metadata(&index_path)
-            .with_context(|| format!("reading BAM index {}", index_path.display()))?;
         Ok(Self {
             bam_size: metadata.len(),
             bam_modified: metadata.modified()?,
-            bai_size: index_metadata.len(),
-            bai_modified: index_metadata.modified()?,
         })
     }
 }
@@ -326,6 +317,7 @@ fn scan(path: &Path, regions: &[Region]) -> Result<Vec<Stats>> {
         reader.fetch((tid, region.start, region.end))?;
         let options = InputBamBuilder::default()
             .read_filter("primary_forward,primary_reverse".to_owned())
+            .include_zero_len(true)
             .region_bed3(interval)
             .build()?;
         let mut report = Vec::new();

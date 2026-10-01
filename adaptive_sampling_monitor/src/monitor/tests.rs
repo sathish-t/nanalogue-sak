@@ -45,6 +45,11 @@ fn regions() -> Result<Vec<Region>> {
 
 /// Writes coordinate-sorted SAM records into a BAM and builds its BAI index.
 fn write_bam(path: &Path, records: &[&str]) -> Result<()> {
+    write_bam_with_index(path, records, bam::index::Type::Bai)
+}
+
+/// Writes coordinate-sorted SAM records and builds the requested index type.
+fn write_bam_with_index(path: &Path, records: &[&str], index_type: bam::index::Type) -> Result<()> {
     let mut header = Header::new();
     let _chr2 = header.push_record(
         HeaderRecord::new(b"SQ")
@@ -67,7 +72,7 @@ fn write_bam(path: &Path, records: &[&str]) -> Result<()> {
         writer.write(record)?;
     }
     drop(writer);
-    bam::index::build(path, None, bam::index::Type::Bai, 2)?;
+    bam::index::build(path, None, index_type, 2)?;
     Ok(())
 }
 
@@ -252,6 +257,93 @@ fn missing_index_remains_pending() -> Result<()> {
             .is_some_and(|warning| warning.contains("index")),
         "missing index is reported: {:?}",
         monitor.snapshot.warning
+    );
+    Ok(())
+}
+
+/// `HTSlib` discovers an index without normalizing an uppercase BAM extension.
+#[test]
+fn uppercase_bam_uses_matching_index_name() -> Result<()> {
+    let directory = TestDirectory::new()?;
+    let path = directory.path().join("reads.BAM");
+    write_bam(&path, &["read\t0\tchr1\t101\t60\t3M\t*\t0\t0\tAAA\t*"])?;
+    let mut monitor = Monitor::new(directory.path().to_path_buf(), &regions()?);
+    poll(&mut monitor)?;
+    assert_eq!(monitor.snapshot.processed, 1, "uppercase BAM is accepted");
+    assert_eq!(monitor.snapshot.pending, 0, "uppercase BAM is not retried");
+    assert_eq!(
+        monitor.snapshot.stats.first(),
+        Some(&Stats { count: 1, bases: 3 }),
+        "uppercase BAM contributes normally"
+    );
+    Ok(())
+}
+
+/// `HTSlib` discovers and uses a CSI index without application-side path logic.
+#[test]
+fn csi_index_is_discovered() -> Result<()> {
+    let directory = TestDirectory::new()?;
+    let path = directory.path().join("reads.bam");
+    write_bam_with_index(
+        &path,
+        &["read\t0\tchr1\t101\t60\t3M\t*\t0\t0\tAAA\t*"],
+        bam::index::Type::Csi(14),
+    )?;
+    assert!(
+        !path.with_extension("bam.bai").exists(),
+        "fixture has no BAI fallback"
+    );
+    assert!(
+        path.with_extension("bam.csi").exists(),
+        "fixture has only a CSI index"
+    );
+    let mut monitor = Monitor::new(directory.path().to_path_buf(), &regions()?);
+    poll(&mut monitor)?;
+    assert_eq!(monitor.snapshot.processed, 1, "CSI-indexed BAM is accepted");
+    assert_eq!(
+        monitor.snapshot.pending, 0,
+        "CSI-indexed BAM is not retried"
+    );
+    assert_eq!(
+        monitor.snapshot.stats.first(),
+        Some(&Stats { count: 1, bases: 3 }),
+        "CSI-indexed BAM contributes normally"
+    );
+    Ok(())
+}
+
+/// A primary alignment without stored sequence reaches nanalogue validation.
+#[test]
+fn primary_zero_length_sequence_remains_pending() -> Result<()> {
+    let directory = TestDirectory::new()?;
+    let path = directory.path().join("reads.bam");
+    write_bam(
+        &path,
+        &[
+            "valid\t0\tchr1\t101\t60\t3M\t*\t0\t0\tAAA\t*",
+            "missing-sequence\t0\tchr1\t111\t60\t3M\t*\t0\t0\t*\t*",
+        ],
+    )?;
+    let mut monitor = Monitor::new(directory.path().to_path_buf(), &regions()?);
+    poll(&mut monitor)?;
+    assert_eq!(
+        monitor.snapshot.processed, 0,
+        "file with a zero-length primary sequence is not partially accepted"
+    );
+    assert_eq!(monitor.snapshot.pending, 1, "invalid BAM remains pending");
+    assert!(
+        monitor
+            .snapshot
+            .warning
+            .as_ref()
+            .is_some_and(|warning| warning.contains("0-len sequences")),
+        "nanalogue sequence validation is reported: {:?}",
+        monitor.snapshot.warning
+    );
+    assert_eq!(
+        monitor.snapshot.stats.first(),
+        Some(&Stats::default()),
+        "valid records from a rejected BAM are not silently counted"
     );
     Ok(())
 }
@@ -462,21 +554,6 @@ fn fingerprint_and_change_during_scan() -> Result<()> {
         "touch does not change BAM size"
     );
     assert_ne!(initial, touched, "timestamp alone detects a change");
-    let index_path = path.with_extension("bam.bai");
-    let index_later = touched
-        .bai_modified
-        .checked_add(Duration::from_secs(2))
-        .context("index timestamp overflow")?;
-    File::options()
-        .write(true)
-        .open(index_path)?
-        .set_times(FileTimes::new().set_modified(index_later))?;
-    let index_touched = Fingerprint::read(&path)?;
-    assert_eq!(
-        touched.bam_modified, index_touched.bam_modified,
-        "touching the index leaves BAM metadata unchanged"
-    );
-    assert_ne!(touched, index_touched, "BAI timestamp detects a change");
 
     let mut monitor = Monitor::new(directory.path().to_path_buf(), &regions()?);
     poll(&mut monitor)?;
