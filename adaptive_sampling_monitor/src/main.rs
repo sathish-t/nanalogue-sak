@@ -1,10 +1,12 @@
 //! Live terminal monitor of primary mapped reads overlapping named BED regions.
 
+mod bam_region_scan;
 mod bed;
 mod error;
 mod monitor;
+mod terminal_frame;
+mod terminal_session;
 mod text;
-mod ui;
 
 use std::ffi::OsString;
 use std::fs::File;
@@ -114,7 +116,7 @@ fn run(args: Args) -> Result<()> {
         rust_htslib::htslib::hts_set_log_level(rust_htslib::htslib::htsLogLevel_HTS_LOG_OFF);
     }
     let mut monitor = monitor::Monitor::new(args.directory, &regions);
-    ui::run(&regions, &mut monitor)
+    terminal_session::run(&regions, &mut monitor)
 }
 
 #[cfg(test)]
