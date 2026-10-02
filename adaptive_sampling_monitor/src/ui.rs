@@ -440,6 +440,62 @@ mod tests {
         line.iter().map(|span| span.content().as_str()).collect()
     }
 
+    /// Serializes complete frame content and styling for golden characterization.
+    fn frame_signature(lines: &[Line]) -> String {
+        lines
+            .iter()
+            .map(|line| {
+                line.iter()
+                    .map(|span| format!("{:?}:{:?}", span.style(), span.content()))
+                    .collect::<Vec<_>>()
+                    .join("|")
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    /// Locks down a complete representative frame before code is reorganized.
+    #[test]
+    fn terminal_frame_golden_characterization() -> Result<()> {
+        let regions = crate::bed::parse(
+            &b"chr1\t0\t10\talpha\nchr1\t10\t20\tbeta\nchr1\t20\t30\tgamma\n"[..],
+        )?;
+        let mut snapshot = Snapshot::new(3);
+        snapshot.stats = vec![
+            Stats {
+                count: 100,
+                bases: 123_400,
+            },
+            Stats { count: 1, bases: 9 },
+            Stats::default(),
+        ];
+        snapshot.processed = 2;
+        snapshot.pending = 1;
+        snapshot.activity = "Scanning BAM 2/3: run/reads.bam".to_owned();
+        snapshot.warning = Some("run/pending.bam: missing index".to_owned());
+
+        let actual = frame_signature(&frame(&regions, &snapshot, 0, 72, 12));
+        let expected = concat!(
+            "ContentStyle { foreground_color: Some(White), background_color: Some(Rgb { r: 81, g: 104, b: 130 }), underline_color: None, attributes: Attributes(4) }:\" nanalogue / adaptive sampling                                         \"\n",
+            "ContentStyle { foreground_color: Some(Rgb { r: 138, g: 190, b: 183 }), background_color: None, underline_color: None, attributes: Attributes(0) }:\" BAMs: 2 processed  |  1 pending  |  poll 60s\"\n",
+            "\n",
+            "ContentStyle { foreground_color: Some(Rgb { r: 150, g: 152, b: 150 }), background_color: None, underline_color: None, attributes: Attributes(0) }:\" REGION      READ COUNT / log10\"\n",
+            "ContentStyle { foreground_color: Some(Rgb { r: 150, g: 152, b: 150 }), background_color: None, underline_color: None, attributes: Attributes(0) }:\"             1             10         100\"\n",
+            "ContentStyle { foreground_color: Some(Rgb { r: 150, g: 152, b: 150 }), background_color: None, underline_color: None, attributes: Attributes(0) }:\"             +-------------+------------+\"\n",
+            "ContentStyle { foreground_color: None, background_color: None, underline_color: None, attributes: Attributes(0) }:\" alpha       \"|ContentStyle { foreground_color: Some(Rgb { r: 138, g: 190, b: 183 }), background_color: None, underline_color: None, attributes: Attributes(0) }:\"████████████████████████████\"|ContentStyle { foreground_color: None, background_color: None, underline_color: None, attributes: Attributes(4) }:\"  100 reads\"|ContentStyle { foreground_color: Some(Rgb { r: 150, g: 152, b: 150 }), background_color: None, underline_color: None, attributes: Attributes(0) }:\" | mean 1,234.0 bp\"\n",
+            "ContentStyle { foreground_color: None, background_color: None, underline_color: None, attributes: Attributes(0) }:\" beta        \"|ContentStyle { foreground_color: Some(Rgb { r: 138, g: 190, b: 183 }), background_color: None, underline_color: None, attributes: Attributes(0) }:\"█\"|ContentStyle { foreground_color: None, background_color: None, underline_color: None, attributes: Attributes(4) }:\"  1 read\"|ContentStyle { foreground_color: Some(Rgb { r: 150, g: 152, b: 150 }), background_color: None, underline_color: None, attributes: Attributes(0) }:\" | mean 9.0 bp\"\n",
+            "ContentStyle { foreground_color: None, background_color: None, underline_color: None, attributes: Attributes(0) }:\" gamma       \"|ContentStyle { foreground_color: Some(Rgb { r: 138, g: 190, b: 183 }), background_color: None, underline_color: None, attributes: Attributes(0) }:\"\"|ContentStyle { foreground_color: None, background_color: None, underline_color: None, attributes: Attributes(131072) }:\"  0 reads\"|ContentStyle { foreground_color: Some(Rgb { r: 150, g: 152, b: 150 }), background_color: None, underline_color: None, attributes: Attributes(0) }:\" | mean -\"\n",
+            "ContentStyle { foreground_color: Some(Rgb { r: 150, g: 152, b: 150 }), background_color: None, underline_color: None, attributes: Attributes(0) }:\" Scanning BAM 2/3: run/reads.bam\"\n",
+            "ContentStyle { foreground_color: Some(Yellow), background_color: None, underline_color: None, attributes: Attributes(0) }:\" Waiting/retry: run/pending.bam: missing index\"\n",
+            "ContentStyle { foreground_color: None, background_color: None, underline_color: None, attributes: Attributes(4096) }:\" j/k up/down scroll   pgup/pgdn   home/end   q quit                    \"",
+        );
+        assert_eq!(
+            actual, expected,
+            "complete frame content and styles stay stable"
+        );
+        Ok(())
+    }
+
     /// Waiting and scanning share quit and navigation event behavior.
     #[test]
     fn shared_event_handler_quits_and_navigates() {
