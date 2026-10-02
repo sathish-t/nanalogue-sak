@@ -9,7 +9,7 @@ use std::time::SystemTime;
 
 #[cfg(test)]
 use crate::bam_region_scan::parse_read_stats;
-use crate::bam_region_scan::scan;
+use crate::bam_region_scan::scan_bam_regions;
 use crate::bed::Region;
 use crate::error::{Context as _, Result, ensure};
 
@@ -18,14 +18,14 @@ const MAX_BAM_BYTES: u64 = 5_000_000_000;
 
 /// Count and reconstructed length total from nanalogue read statistics.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct Stats {
+pub(crate) struct RegionReadStats {
     /// Number of primary mapped reads overlapping this region.
     pub count: u64,
     /// Primary count multiplied by nanalogue's integer mean sequence length.
     pub bases: u64,
 }
 
-impl Stats {
+impl RegionReadStats {
     /// Replaces one file's contribution in a global total.
     fn replace(self, old: Self, new: Self) -> Result<Self> {
         Ok(Self {
@@ -69,14 +69,14 @@ struct Contribution {
     /// Metadata corresponding to exactly these statistics.
     fingerprint: Fingerprint,
     /// Statistics in BED order.
-    stats: Vec<Stats>,
+    stats: Vec<RegionReadStats>,
 }
 
 /// Consistent statistics and status displayed between synchronous scans.
 #[derive(Debug)]
-pub(crate) struct Snapshot {
+pub(crate) struct MonitorSnapshot {
     /// Totals in BED-file order.
-    pub stats: Vec<Stats>,
+    pub stats: Vec<RegionReadStats>,
     /// Number of files whose contributions are included.
     pub processed: usize,
     /// New, changed or unreadable files still awaiting a successful scan.
@@ -87,11 +87,11 @@ pub(crate) struct Snapshot {
     pub warning: Option<String>,
 }
 
-impl Snapshot {
+impl MonitorSnapshot {
     /// Empty initial view, before directory enumeration begins.
     pub(crate) fn new(region_count: usize) -> Self {
         Self {
-            stats: vec![Stats::default(); region_count],
+            stats: vec![RegionReadStats::default(); region_count],
             processed: 0,
             pending: 0,
             activity: "Discovering BAM files".to_owned(),
@@ -110,7 +110,7 @@ pub(crate) struct Monitor {
     /// Last accepted contributions, keyed by paths that must remain present.
     files: BTreeMap<PathBuf, Contribution>,
     /// Current global totals and processing status.
-    snapshot: Snapshot,
+    snapshot: MonitorSnapshot,
 }
 
 impl Monitor {
@@ -120,14 +120,14 @@ impl Monitor {
             directory,
             regions: regions.to_vec(),
             files: BTreeMap::new(),
-            snapshot: Snapshot::new(regions.len()),
+            snapshot: MonitorSnapshot::new(regions.len()),
         }
     }
 
     /// Discovers changes, reporting cooperative UI checkpoints during synchronous scans.
     pub(crate) fn refresh<F>(&mut self, mut progress: F) -> Result<ControlFlow<()>>
     where
-        F: FnMut(&Snapshot) -> Result<ControlFlow<()>>,
+        F: FnMut(&MonitorSnapshot) -> Result<ControlFlow<()>>,
     {
         self.ensure_processed_files_exist()?;
         self.snapshot.warning = None;
@@ -161,8 +161,8 @@ impl Monitor {
                 return Ok(ControlFlow::Break(()));
             }
 
-            let result =
-                scan(&path, &self.regions).and_then(|stats| self.accept(&path, before, stats));
+            let result = scan_bam_regions(&path, &self.regions)
+                .and_then(|stats| self.accept(&path, before, stats));
             if let Err(error) = result {
                 self.snapshot.warning = Some(format!("{}: {error}", path.display()));
             } else {
@@ -181,7 +181,7 @@ impl Monitor {
     }
 
     /// Returns the latest complete statistics and monitoring status.
-    pub(crate) fn snapshot(&self) -> &Snapshot {
+    pub(crate) fn snapshot(&self) -> &MonitorSnapshot {
         &self.snapshot
     }
 
@@ -269,7 +269,12 @@ impl Monitor {
     }
 
     /// Commits metadata and totals together, only if the scan's input is stable.
-    fn accept(&mut self, path: &Path, before: Fingerprint, stats: Vec<Stats>) -> Result<()> {
+    fn accept(
+        &mut self,
+        path: &Path,
+        before: Fingerprint,
+        stats: Vec<RegionReadStats>,
+    ) -> Result<()> {
         ensure(
             Fingerprint::read(path)? == before,
             "file changed while scanning; retrying next minute",

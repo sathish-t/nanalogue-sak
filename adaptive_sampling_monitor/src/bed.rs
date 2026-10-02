@@ -34,7 +34,7 @@ pub(crate) fn ensure_size(size: u64) -> Result<()> {
 ///
 /// Rejects empty intervals, negative coordinates, duplicate/empty labels and
 /// control characters that could otherwise inject commands into the terminal.
-pub(crate) fn parse<R: BufRead>(reader: R) -> Result<Vec<Region>> {
+pub(crate) fn parse_bed_regions<R: BufRead>(reader: R) -> Result<Vec<Region>> {
     let mut regions = Vec::new();
     let mut names = BTreeSet::new();
     for (offset, result) in reader.lines().enumerate() {
@@ -116,7 +116,8 @@ mod tests {
             ("chr\u{754c}\t0\t20\ta\n", "invalid contig"),
             ("# comment\n", "no regions"),
         ] {
-            let error = parse(input.as_bytes()).expect_err("invalid BED must be rejected");
+            let error =
+                parse_bed_regions(input.as_bytes()).expect_err("invalid BED must be rejected");
             assert!(
                 error.to_string().contains(expected),
                 "expected {expected}, got {error}"
@@ -128,13 +129,13 @@ mod tests {
     #[test]
     fn label_length_boundary() -> Result<()> {
         let name = "A".repeat(40);
-        let accepted = parse(format!("chr1\t0\t10\t{name}\n").as_bytes())?;
+        let accepted = parse_bed_regions(format!("chr1\t0\t10\t{name}\n").as_bytes())?;
         assert_eq!(
             accepted.first().map(|region| &region.name),
             Some(&name),
             "40-character label retained"
         );
-        let error = parse(format!("chr1\t0\t10\t{name}B\n").as_bytes())
+        let error = parse_bed_regions(format!("chr1\t0\t10\t{name}B\n").as_bytes())
             .expect_err("41-character label rejected");
         assert!(
             error.to_string().contains("exceeds 40"),
@@ -146,7 +147,7 @@ mod tests {
     /// Metadata lines and columns after the label do not become regions.
     #[test]
     fn accepts_metadata_and_extra_columns() -> Result<()> {
-        let regions = parse(
+        let regions = parse_bed_regions(
             &b"track name=targets\n browser position chr1\n# comment\n\nchr1\t0\t10\ta\t0\t+\n"[..],
         )?;
         assert_eq!(regions.len(), 1, "only the BED record is retained");
@@ -156,14 +157,15 @@ mod tests {
     /// Standard CRLF records work, but whitespace cannot silently alter a contig.
     #[test]
     fn crlf_and_contig_whitespace() -> Result<()> {
-        let regions = parse(&b"chr1\t0\t10\ttarget\r\n"[..])?;
+        let regions = parse_bed_regions(&b"chr1\t0\t10\ttarget\r\n"[..])?;
         assert_eq!(
             regions.first().map(|region| region.name.as_str()),
             Some("target"),
             "CRLF is removed before parsing the BED4 name"
         );
         for input in [" chr1\t0\t10\tleading\n", "chr1 \t0\t10\ttrailing\n"] {
-            let error = parse(input.as_bytes()).expect_err("padded contig must be rejected");
+            let error =
+                parse_bed_regions(input.as_bytes()).expect_err("padded contig must be rejected");
             assert!(
                 error.to_string().contains("leading or trailing whitespace"),
                 "contig whitespace has an actionable diagnostic: {error}"

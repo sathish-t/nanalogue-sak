@@ -15,7 +15,7 @@ use crossterm::{execute, queue};
 
 use crate::bed::Region;
 use crate::error::Result;
-use crate::monitor::{Monitor, Snapshot};
+use crate::monitor::{Monitor, MonitorSnapshot};
 use crate::terminal_frame::{CHROME_ROWS, Line, fit, frame};
 
 /// Delay between synchronous directory scans.
@@ -49,7 +49,7 @@ impl Drop for TerminalGuard {
 }
 
 /// Draws the current snapshot and returns the number of visible region rows.
-fn redraw(regions: &[Region], snapshot: &Snapshot, offset: &mut usize) -> Result<usize> {
+fn redraw(regions: &[Region], snapshot: &MonitorSnapshot, offset: &mut usize) -> Result<usize> {
     let (width, height) = terminal::size()?;
     let visible = usize::from(height).saturating_sub(CHROME_ROWS).max(1);
     *offset = (*offset).min(regions.len().saturating_sub(visible));
@@ -95,7 +95,7 @@ fn handle_event(
 }
 
 /// Draws after input events and scans synchronously once per poll interval.
-pub(crate) fn run(regions: &[Region], monitor: &mut Monitor) -> Result<()> {
+pub(crate) fn run_terminal_monitor(regions: &[Region], monitor: &mut Monitor) -> Result<()> {
     let _terminal = TerminalGuard::enter()?;
     let mut offset: usize = 0;
     let mut next_poll = Instant::now();

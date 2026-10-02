@@ -81,7 +81,11 @@ fn main() -> ExitCode {
     match result {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
-            let _written = writeln!(io::stderr(), "Error: {}", text::escape(&error.to_string()));
+            let _written = writeln!(
+                io::stderr(),
+                "Error: {}",
+                text::escape_terminal_text(&error.to_string())
+            );
             ExitCode::FAILURE
         }
     }
@@ -98,7 +102,7 @@ fn run(args: Args) -> Result<()> {
         .with_context(|| format!("reading metadata for {}", args.bed_file.display()))?
         .len();
     bed::ensure_size(bed_size)?;
-    let regions = bed::parse(BufReader::new(input))?;
+    let regions = bed::parse_bed_regions(BufReader::new(input))?;
     ensure(
         args.directory.is_dir(),
         format!("not a directory: {}", args.directory.display()),
@@ -116,7 +120,7 @@ fn run(args: Args) -> Result<()> {
         rust_htslib::htslib::hts_set_log_level(rust_htslib::htslib::htsLogLevel_HTS_LOG_OFF);
     }
     let mut monitor = monitor::Monitor::new(args.directory, &regions);
-    terminal_session::run(&regions, &mut monitor)
+    terminal_session::run_terminal_monitor(&regions, &mut monitor)
 }
 
 #[cfg(test)]

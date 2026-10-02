@@ -12,10 +12,10 @@ use rust_htslib::bam::{FetchDefinition, Read as _};
 
 use crate::bed::Region;
 use crate::error::{Context as _, Result, ensure};
-use crate::monitor::Stats;
+use crate::monitor::RegionReadStats;
 
 /// Runs nanalogue read-stats on each indexed BED region with primary-only filtering.
-pub(crate) fn scan(path: &Path, regions: &[Region]) -> Result<Vec<Stats>> {
+pub(crate) fn scan_bam_regions(path: &Path, regions: &[Region]) -> Result<Vec<RegionReadStats>> {
     check_eof(path)?;
     let mut reader = nanalogue_indexed_bam_reader(path, FetchDefinition::All)?;
     reader.set_threads(2)?;
@@ -23,7 +23,7 @@ pub(crate) fn scan(path: &Path, regions: &[Region]) -> Result<Vec<Stats>> {
         reader.header().target_count() > 0,
         "BAM has no reference sequences; enable MinKNOW output alignment",
     )?;
-    let mut stats = vec![Stats::default(); regions.len()];
+    let mut stats = vec![RegionReadStats::default(); regions.len()];
     for (region, total) in regions.iter().zip(&mut stats) {
         let Some(tid) = reader.header().tid(region.contig.as_bytes()) else {
             continue;
@@ -48,7 +48,7 @@ pub(crate) fn scan(path: &Path, regions: &[Region]) -> Result<Vec<Stats>> {
 }
 
 /// Extracts the two read-stats fields needed for cross-BAM weighted means.
-pub(crate) fn parse_read_stats(report: &[u8]) -> Result<Stats> {
+pub(crate) fn parse_read_stats(report: &[u8]) -> Result<RegionReadStats> {
     let text = str::from_utf8(report)?;
     let value = |key: &str| -> Result<u64> {
         let raw = text
@@ -61,7 +61,7 @@ pub(crate) fn parse_read_stats(report: &[u8]) -> Result<Stats> {
     };
     let count = value("n_primary_alignments")?;
     let mean = value("seq_len_mean")?;
-    Ok(Stats {
+    Ok(RegionReadStats {
         count,
         bases: count
             .checked_mul(mean)

@@ -40,7 +40,7 @@ impl Drop for TestDirectory {
 
 /// Two overlapping regions on chr1 and an independent region on chr2.
 fn regions() -> Result<Vec<Region>> {
-    crate::bed::parse(&b"chr1\t100\t200\tA\nchr1\t180\t300\tB\nchr2\t0\t100\tC\n"[..])
+    crate::bed::parse_bed_regions(&b"chr1\t100\t200\tA\nchr1\t180\t300\tB\nchr2\t0\t100\tC\n"[..])
 }
 
 /// Writes coordinate-sorted SAM records into a BAM and builds its BAI index.
@@ -109,7 +109,7 @@ fn skips_non_ascii_and_control_paths() -> Result<()> {
     );
     assert_eq!(
         monitor.snapshot.stats.first(),
-        Some(&Stats { count: 1, bases: 3 }),
+        Some(&RegionReadStats { count: 1, bases: 3 }),
         "only ASCII path contributes"
     );
     let warning = monitor.snapshot.warning.as_ref().context("path warning")?;
@@ -158,15 +158,15 @@ fn primary_overlap_and_read_stats_means() -> Result<()> {
     assert_eq!(
         monitor.snapshot.stats,
         vec![
-            Stats {
+            RegionReadStats {
                 count: 5,
                 bases: 55
             },
-            Stats {
+            RegionReadStats {
                 count: 4,
                 bases: 48
             },
-            Stats { count: 1, bases: 3 }
+            RegionReadStats { count: 1, bases: 3 }
         ],
         "each region uses its own primary count and truncated read-stats mean"
     );
@@ -183,7 +183,7 @@ fn primary_overlap_and_read_stats_means() -> Result<()> {
 fn nested_half_open_overlaps() -> Result<()> {
     let directory = TestDirectory::new()?;
     let path = directory.path().join("reads.bam");
-    let targets = crate::bed::parse(
+    let targets = crate::bed::parse_bed_regions(
         &b"chr1\t100\t200\tright\nchr1\t0\t1000\touter\nchr1\t20\t40\tinner\nabsent\t0\t100\tmissing\nchr2\t0\t100\tother\n"[..],
     )?;
     write_bam(
@@ -195,15 +195,15 @@ fn nested_half_open_overlaps() -> Result<()> {
             "cross\t0\tchr1\t40\t60\t1M60D1M\t*\t0\t0\tAA\t*",
         ],
     )?;
-    let actual = scan(&path, &targets)?;
+    let actual = scan_bam_regions(&path, &targets)?;
     assert_eq!(
         actual,
         vec![
-            Stats { count: 1, bases: 2 },
-            Stats { count: 2, bases: 4 },
-            Stats { count: 1, bases: 2 },
-            Stats::default(),
-            Stats::default(),
+            RegionReadStats { count: 1, bases: 2 },
+            RegionReadStats { count: 2, bases: 4 },
+            RegionReadStats { count: 1, bases: 2 },
+            RegionReadStats::default(),
+            RegionReadStats::default(),
         ],
         "half-open intersection counts each target independently in BED order"
     );
@@ -222,7 +222,7 @@ fn read_stats_primary_filter_replaces_contribution() -> Result<()> {
     let accepted = monitor.snapshot.stats.clone();
     assert_eq!(
         accepted.first(),
-        Some(&Stats { count: 1, bases: 3 }),
+        Some(&RegionReadStats { count: 1, bases: 3 }),
         "valid initial data is accepted"
     );
     let secondary = "secondary\t256\tchr1\t101\t60\t3M\t*\t0\t0\t*\t*";
@@ -232,7 +232,7 @@ fn read_stats_primary_filter_replaces_contribution() -> Result<()> {
     poll(&mut monitor)?;
     assert_eq!(
         monitor.snapshot.stats.first(),
-        Some(&Stats { count: 2, bases: 6 }),
+        Some(&RegionReadStats { count: 2, bases: 6 }),
         "primary-filtered read-stats replaces the old contribution"
     );
     assert_eq!(
@@ -275,7 +275,7 @@ fn refresh_can_stop_before_scanning_a_file() -> Result<()> {
     );
     assert_eq!(
         monitor.snapshot.stats.first(),
-        Some(&Stats::default()),
+        Some(&RegionReadStats::default()),
         "interrupted BAM contributes no partial statistics"
     );
     Ok(())
@@ -316,7 +316,7 @@ fn uppercase_bam_uses_matching_index_name() -> Result<()> {
     assert_eq!(monitor.snapshot.pending, 0, "uppercase BAM is not retried");
     assert_eq!(
         monitor.snapshot.stats.first(),
-        Some(&Stats { count: 1, bases: 3 }),
+        Some(&RegionReadStats { count: 1, bases: 3 }),
         "uppercase BAM contributes normally"
     );
     Ok(())
@@ -349,7 +349,7 @@ fn csi_index_is_discovered() -> Result<()> {
     );
     assert_eq!(
         monitor.snapshot.stats.first(),
-        Some(&Stats { count: 1, bases: 3 }),
+        Some(&RegionReadStats { count: 1, bases: 3 }),
         "CSI-indexed BAM contributes normally"
     );
     Ok(())
@@ -385,7 +385,7 @@ fn primary_zero_length_sequence_remains_pending() -> Result<()> {
     );
     assert_eq!(
         monitor.snapshot.stats.first(),
-        Some(&Stats::default()),
+        Some(&RegionReadStats::default()),
         "valid records from a rejected BAM are not silently counted"
     );
     Ok(())
@@ -425,7 +425,7 @@ fn parses_read_stats_report() -> Result<()> {
     let report = b"key\tvalue\nn_primary_alignments\t3\nseq_len_mean\t133\n";
     assert_eq!(
         parse_read_stats(report)?,
-        Stats {
+        RegionReadStats {
             count: 3,
             bases: 399
         },
@@ -443,8 +443,11 @@ fn parses_read_stats_report() -> Result<()> {
 /// Replacement arithmetic failures use neutral diagnostics for either operation.
 #[test]
 fn stats_replacement_arithmetic_diagnostics() {
-    let read_error = Stats { count: 0, bases: 0 }
-        .replace(Stats { count: 1, bases: 0 }, Stats::default())
+    let read_error = RegionReadStats { count: 0, bases: 0 }
+        .replace(
+            RegionReadStats { count: 1, bases: 0 },
+            RegionReadStats::default(),
+        )
         .expect_err("subtracting a larger read count must fail");
     assert_eq!(
         read_error.to_string(),
@@ -452,11 +455,14 @@ fn stats_replacement_arithmetic_diagnostics() {
         "read arithmetic diagnostic does not misclassify the operation"
     );
 
-    let base_error = Stats {
+    let base_error = RegionReadStats {
         count: 0,
         bases: u64::MAX,
     }
-    .replace(Stats::default(), Stats { count: 0, bases: 1 })
+    .replace(
+        RegionReadStats::default(),
+        RegionReadStats { count: 0, bases: 1 },
+    )
     .expect_err("adding beyond the base-count limit must fail");
     assert_eq!(
         base_error.to_string(),
@@ -500,7 +506,7 @@ fn recursive_discovery_replacement_and_retry() -> Result<()> {
     poll(&mut monitor)?;
     assert_eq!(
         monitor.snapshot.stats.first(),
-        Some(&Stats {
+        Some(&RegionReadStats {
             count: 3,
             bases: 17
         }),
@@ -519,7 +525,7 @@ fn recursive_discovery_replacement_and_retry() -> Result<()> {
     poll(&mut monitor)?;
     assert_eq!(
         monitor.snapshot.stats.first(),
-        Some(&Stats {
+        Some(&RegionReadStats {
             count: 5,
             bases: 29
         }),
@@ -535,7 +541,7 @@ fn recursive_discovery_replacement_and_retry() -> Result<()> {
     poll(&mut monitor)?;
     assert_eq!(
         monitor.snapshot.stats.first(),
-        Some(&Stats {
+        Some(&RegionReadStats {
             count: 5,
             bases: 29
         }),
@@ -560,7 +566,7 @@ fn recursive_discovery_replacement_and_retry() -> Result<()> {
     poll(&mut monitor)?;
     assert_eq!(
         monitor.snapshot.stats.first(),
-        Some(&Stats {
+        Some(&RegionReadStats {
             count: 4,
             bases: 24
         }),
@@ -627,7 +633,7 @@ fn fingerprint_and_change_during_scan() -> Result<()> {
     poll(&mut monitor)?;
     let accepted = monitor.snapshot.stats.clone();
     let before = Fingerprint::read(&path)?;
-    let scanned = scan(&path, &monitor.regions)?;
+    let scanned = scan_bam_regions(&path, &monitor.regions)?;
     write_bam(&path, &[read, read, read])?;
     File::options()
         .write(true)
@@ -656,7 +662,7 @@ fn fingerprint_and_change_during_scan() -> Result<()> {
     poll(&mut monitor)?;
     assert_eq!(
         monitor.snapshot.stats.first(),
-        Some(&Stats { count: 3, bases: 9 }),
+        Some(&RegionReadStats { count: 3, bases: 9 }),
         "next stable scan replaces the old contribution"
     );
     Ok(())

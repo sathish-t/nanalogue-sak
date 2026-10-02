@@ -10,7 +10,7 @@ pub(crate) fn is_printable_ascii(text: &str) -> bool {
 }
 
 /// Preserves printable ASCII and visibly escapes all other characters.
-pub(crate) fn escape(text: &str) -> String {
+pub(crate) fn escape_terminal_text(text: &str) -> String {
     let mut output = String::new();
     for character in text.chars() {
         if (' '..='~').contains(&character) {
@@ -43,7 +43,7 @@ mod tests {
     #[test]
     fn external_text_is_ascii() {
         assert_eq!(
-            escape("a '\\' \u{754c}\u{301}\n\t\u{1b}[31m\u{7f}"),
+            escape_terminal_text("a '\\' \u{754c}\u{301}\n\t\u{1b}[31m\u{7f}"),
             "a '\\' \\u{754c}\\u{301}\\n\\t\\u{1b}[31m\\u{7f}",
             "wide, combining and control characters are escaped, not dropped"
         );
@@ -54,7 +54,7 @@ mod tests {
         for invalid in ["\u{1f}", "\u{7f}", "\u{e9}", "\t"] {
             assert!(!is_printable_ascii(invalid), "non-printable input rejected");
             assert!(
-                is_printable_ascii(&escape(invalid)),
+                is_printable_ascii(&escape_terminal_text(invalid)),
                 "escaped output is safe"
             );
         }

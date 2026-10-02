@@ -5,8 +5,8 @@ use crossterm::style::{Attribute, Color, StyledContent, Stylize as _};
 use crate::bed::Region;
 #[cfg(test)]
 use crate::error::Result;
-use crate::monitor::{Snapshot, Stats};
-use crate::text::escape;
+use crate::monitor::{MonitorSnapshot, RegionReadStats};
+use crate::text::escape_terminal_text;
 
 /// Rows reserved for title, statistics, headings, axis and status/footer.
 pub(super) const CHROME_ROWS: usize = 9;
@@ -52,7 +52,7 @@ fn label(text: &str, width: usize) -> String {
 fn warning_text(message: &str, columns: usize) -> String {
     let prefix = " Waiting/retry: ";
     let room = columns.saturating_sub(prefix.len());
-    let safe = escape(message);
+    let safe = escape_terminal_text(message);
     if safe.len() <= room {
         return format!("{prefix}{safe}");
     }
@@ -69,7 +69,7 @@ fn warning_text(message: &str, columns: usize) -> String {
     clippy::cast_precision_loss,
     reason = "Display rounds the reconstructed weighted mean to one decimal"
 )]
-fn mean(stats: Stats) -> String {
+fn mean(stats: RegionReadStats) -> String {
     if stats.count == 0 {
         return "-".to_owned();
     }
@@ -91,7 +91,7 @@ fn grouped(digits: &str) -> String {
 }
 
 /// Count and reconstructed mean annotations, placed directly after each bar's tip.
-fn annotation(stats: Stats) -> (String, String) {
+fn annotation(stats: RegionReadStats) -> (String, String) {
     let reads = if stats.count == 1 { "read" } else { "reads" };
     let count = format!("{} {reads}", grouped(&stats.count.to_string()));
     let unit = if stats.count == 0 { "" } else { " bp" };
@@ -175,7 +175,7 @@ fn small_frame(columns: usize, rows: usize) -> Vec<Line> {
 /// Constructs a terminal-sized frame with a global scale across scrolled rows.
 pub(super) fn frame(
     regions: &[Region],
-    snapshot: &Snapshot,
+    snapshot: &MonitorSnapshot,
     offset: usize,
     width: u16,
     height: u16,
@@ -254,7 +254,9 @@ pub(super) fn frame(
         ]);
     }
     lines.resize(rows.saturating_sub(3), Vec::new());
-    lines.push(vec![format!(" {}", escape(&snapshot.activity)).with(MUTED)]);
+    lines.push(vec![
+        format!(" {}", escape_terminal_text(&snapshot.activity)).with(MUTED),
+    ]);
     lines.push(vec![snapshot.warning.as_ref().map_or_else(
         || {
             format!(
@@ -305,17 +307,17 @@ mod tests {
     /// Locks down a complete representative frame before code is reorganized.
     #[test]
     fn terminal_frame_golden_characterization() -> Result<()> {
-        let regions = crate::bed::parse(
+        let regions = crate::bed::parse_bed_regions(
             &b"chr1\t0\t10\talpha\nchr1\t10\t20\tbeta\nchr1\t20\t30\tgamma\n"[..],
         )?;
-        let mut snapshot = Snapshot::new(3);
+        let mut snapshot = MonitorSnapshot::new(3);
         snapshot.stats = vec![
-            Stats {
+            RegionReadStats {
                 count: 100,
                 bases: 123_400,
             },
-            Stats { count: 1, bases: 9 },
-            Stats::default(),
+            RegionReadStats { count: 1, bases: 9 },
+            RegionReadStats::default(),
         ];
         snapshot.processed = 2;
         snapshot.pending = 1;
@@ -362,16 +364,20 @@ mod tests {
             "log10(2) gives three full cells and a three-eighths tip"
         );
         assert_eq!(
-            mean(Stats {
+            mean(RegionReadStats {
                 count: 3,
                 bases: 401
             }),
             "133.7",
             "round the weighted mean only for display"
         );
-        assert_eq!(mean(Stats::default()), "-", "empty regions have no mean");
         assert_eq!(
-            annotation(Stats {
+            mean(RegionReadStats::default()),
+            "-",
+            "empty regions have no mean"
+        );
+        assert_eq!(
+            annotation(RegionReadStats {
                 count: 1547,
                 bases: 3_248_600
             }),
@@ -400,7 +406,7 @@ mod tests {
             "ASCII label is padded by byte length"
         );
         assert_eq!(
-            fit(&escape("a\u{1b}\nb"), 4),
+            fit(&escape_terminal_text("a\u{1b}\nb"), 4),
             "a\\u{",
             "escape expansion happens before clipping"
         );
@@ -428,9 +434,9 @@ mod tests {
     /// Only generated bars may introduce non-ASCII cells into a rendered frame.
     #[test]
     fn frame_escapes_external_messages() -> Result<()> {
-        let regions = crate::bed::parse(&b"chr1\t0\t10\tASCII label\n"[..])?;
-        let mut snapshot = Snapshot::new(1);
-        snapshot.stats = vec![Stats {
+        let regions = crate::bed::parse_bed_regions(&b"chr1\t0\t10\tASCII label\n"[..])?;
+        let mut snapshot = MonitorSnapshot::new(1);
+        snapshot.stats = vec![RegionReadStats {
             count: 2,
             bases: 13,
         }];
@@ -470,10 +476,10 @@ mod tests {
     /// Scrolling preserves input order and a compact screen remains bounded.
     #[test]
     fn scrolled_and_small_frames() -> Result<()> {
-        let regions = crate::bed::parse(
+        let regions = crate::bed::parse_bed_regions(
             &b"chr1\t0\t10\tfirst\nchr1\t10\t20\tsecond\nchr1\t20\t30\tthird\n"[..],
         )?;
-        let mut snapshot = Snapshot::new(3);
+        let mut snapshot = MonitorSnapshot::new(3);
         snapshot.warning = Some("incomplete BAM".to_owned());
         let lines = frame(&regions, &snapshot, 1, 80, 11);
         let screen = lines.iter().map(text).collect::<Vec<_>>().join("\n");
@@ -502,20 +508,20 @@ mod tests {
     /// Annotations follow tips, not columns, without changing scale on scroll.
     #[test]
     fn floating_annotations_and_global_scale() -> Result<()> {
-        let regions = crate::bed::parse(
+        let regions = crate::bed::parse_bed_regions(
             &b"chr1\t0\t10\tlong\nchr1\t10\t20\tshort\nchr1\t20\t30\tempty\n"[..],
         )?;
-        let mut snapshot = Snapshot::new(3);
+        let mut snapshot = MonitorSnapshot::new(3);
         snapshot.stats = vec![
-            Stats {
+            RegionReadStats {
                 count: 1000,
                 bases: 2_000_000,
             },
-            Stats {
+            RegionReadStats {
                 count: 2,
                 bases: 13,
             },
-            Stats::default(),
+            RegionReadStats::default(),
         ];
         for width in [72, 120] {
             let lines = frame(&regions, &snapshot, 0, width, 12);
