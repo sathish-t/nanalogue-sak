@@ -3,6 +3,12 @@
 A Swiss army knife of Rust tools built on [nanalogue](https://github.com/DNAReplicationLab/nanalogue).
 Each tool lives in its own Cargo package within this workspace, not a nested Git repository.
 
+## Agent skills
+
+The `write-discoverable-code` skill under `.agents/skills/` was obtained from
+[modem-dev/skills](https://github.com/modem-dev/skills). It is MIT licensed; see
+[the included license](.agents/skills/write-discoverable-code/LICENSE).
+
 ## Adaptive sampling monitor
 
 ```sh
