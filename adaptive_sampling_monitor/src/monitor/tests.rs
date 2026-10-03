@@ -278,6 +278,22 @@ fn refresh_can_stop_before_scanning_a_file() -> Result<()> {
         Some(&RegionReadStats::default()),
         "interrupted BAM contributes no partial statistics"
     );
+
+    let post_scan_outcome = monitor.refresh(|snapshot| {
+        if snapshot.processed == 1 {
+            Ok(ControlFlow::Break(()))
+        } else {
+            Ok(ControlFlow::Continue(()))
+        }
+    })?;
+    assert!(
+        post_scan_outcome.is_break(),
+        "refresh can stop after accepting a file"
+    );
+    assert_eq!(
+        monitor.snapshot.processed, 1,
+        "post-scan interruption retains the complete accepted contribution"
+    );
     Ok(())
 }
 
@@ -355,6 +371,29 @@ fn csi_index_is_discovered() -> Result<()> {
     Ok(())
 }
 
+/// A valid BAM may omit a BED contig and contributes zero for that region.
+#[test]
+fn missing_reference_sequence_has_zero_stats() -> Result<()> {
+    let directory = TestDirectory::new()?;
+    let path = directory.path().join("reads.bam");
+    write_bam(&path, &["read\t0\tchr1\t101\t60\t3M\t*\t0\t0\tAAA\t*"])?;
+    let absent_region = Region {
+        contig: "chrMissing".to_owned(),
+        start: 0,
+        end: 10,
+        name: "absent".to_owned(),
+    };
+
+    let stats = scan_bam_regions(&path, &[absent_region])?;
+
+    assert_eq!(
+        stats,
+        vec![RegionReadStats::default()],
+        "missing BAM reference contributes zero without rejecting the file"
+    );
+    Ok(())
+}
+
 /// A primary alignment without stored sequence reaches nanalogue validation.
 #[test]
 fn primary_zero_length_sequence_remains_pending() -> Result<()> {
@@ -422,9 +461,9 @@ fn oversized_bam_is_fatal() -> Result<()> {
 /// Parsed read-stats fields reconstruct the weighted cross-BAM numerator.
 #[test]
 fn parses_read_stats_report() -> Result<()> {
-    let report = b"key\tvalue\nn_primary_alignments\t3\nseq_len_mean\t133\n";
+    let valid_report = b"key\tvalue\nn_primary_alignments\t3\nseq_len_mean\t133\n";
     assert_eq!(
-        parse_read_stats(report)?,
+        parse_read_stats(valid_report)?,
         RegionReadStats {
             count: 3,
             bases: 399
@@ -437,6 +476,23 @@ fn parses_read_stats_report() -> Result<()> {
         error.to_string().contains("seq_len_mean"),
         "missing field is actionable"
     );
+    for (invalid_report, expected) in [
+        (
+            &b"n_primary_alignments\tinvalid\nseq_len_mean\t1\n"[..],
+            "invalid 'n_primary_alignments'",
+        ),
+        (
+            &b"n_primary_alignments\t18446744073709551615\nseq_len_mean\t2\n"[..],
+            "length total overflow",
+        ),
+    ] {
+        let invalid_error =
+            parse_read_stats(invalid_report).expect_err("invalid read-stats report must fail");
+        assert!(
+            invalid_error.to_string().contains(expected),
+            "expected {expected}, got {invalid_error}"
+        );
+    }
     Ok(())
 }
 

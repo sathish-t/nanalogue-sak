@@ -74,3 +74,28 @@ where
         self.map_err(|error| message(format!("{}: {error}", make_text())))
     }
 }
+
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+mod tests {
+    //! Error context variants retain both operation and underlying cause.
+    use super::*;
+
+    /// Static result context preserves the parse failure after its operation label.
+    #[test]
+    fn result_static_context_preserves_cause() {
+        let error = "not-a-number"
+            .parse::<u8>()
+            .context("parsing count")
+            .expect_err("invalid integer must fail");
+        let diagnostic = error.to_string();
+        assert!(
+            diagnostic.starts_with("parsing count: "),
+            "context is first"
+        );
+        assert!(
+            diagnostic.contains("invalid digit"),
+            "underlying parse cause is retained"
+        );
+    }
+}

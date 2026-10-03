@@ -96,6 +96,7 @@ pub(crate) fn parse_bed_regions<R: BufRead>(reader: R) -> Result<Vec<Region>> {
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     //! Boundary and input validation tests.
     use super::*;
@@ -106,8 +107,14 @@ mod tests {
         for (input, expected) in [
             ("chr1\t0\t20\n", "four tab-separated"),
             ("chr1\t0\t20\ta\nchr2\t3\t4\ta\n", "duplicate name 'a'"),
+            ("chr1\tstart\t20\ta\n", "invalid start"),
+            ("chr1\t0\tend\ta\n", "invalid end"),
             ("chr1\t-1\t20\ta\n", "0 <= start < end"),
             ("chr1\t20\t20\ta\n", "0 <= start < end"),
+            (
+                "chr1\t4294967296\t4294967297\ta\n",
+                "start exceeds u32::MAX",
+            ),
             ("chr1\t0\t4294967296\ta\n", "end exceeds u32::MAX"),
             ("chr1\t0\t20\t\n", "empty name"),
             ("chr1\t0\t20\t\u{1b}[31m\n", "invalid or empty name"),

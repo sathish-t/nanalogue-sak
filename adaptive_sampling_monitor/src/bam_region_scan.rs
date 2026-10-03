@@ -85,3 +85,59 @@ fn check_eof(path: &Path) -> Result<()> {
     ensure(trailer == EOF, "BAM is incomplete: missing end marker")?;
     Ok(())
 }
+
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+mod tests {
+    //! BAM footer validation failures before `HTSlib` opens the file.
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    use super::*;
+
+    /// Missing, truncated and wrong footer inputs all fail before BAM scanning.
+    #[test]
+    fn eof_validation_rejects_missing_short_and_invalid_files() -> Result<()> {
+        let unique = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos();
+        let directory = std::env::temp_dir().join(format!(
+            "nanalogue-adaptive-monitor-eof-{}-{unique}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&directory)?;
+
+        let missing = directory.join("missing.bam");
+        let missing_error = check_eof(&missing).expect_err("missing BAM must fail");
+        assert!(
+            !missing_error.to_string().is_empty(),
+            "filesystem error is retained"
+        );
+
+        let short = directory.join("short.bam");
+        fs::write(&short, b"short")?;
+        let short_error = check_eof(&short).expect_err("short BAM must fail");
+        assert!(
+            short_error.to_string().contains("missing end marker"),
+            "short file has an actionable diagnostic"
+        );
+
+        let invalid = directory.join("invalid.bam");
+        fs::write(&invalid, [0; 28])?;
+        let invalid_error = check_eof(&invalid).expect_err("wrong footer must fail");
+        assert!(
+            invalid_error.to_string().contains("missing end marker"),
+            "wrong footer has an actionable diagnostic"
+        );
+
+        fs::remove_dir_all(directory)?;
+        Ok(())
+    }
+
+    /// Nanalogue output must be UTF-8 before field parsing begins.
+    #[test]
+    fn read_stats_rejects_invalid_utf8() {
+        let error = parse_read_stats(&[0xff]).expect_err("non-UTF-8 report must fail");
+        assert!(
+            error.to_string().contains("invalid utf-8"),
+            "UTF-8 diagnostic is retained: {error}"
+        );
+    }
+}

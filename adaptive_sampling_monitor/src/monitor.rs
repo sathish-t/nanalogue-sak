@@ -319,4 +319,5 @@ fn eligible_name(file_name: &OsStr) -> bool {
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests;

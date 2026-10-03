@@ -280,6 +280,7 @@ pub(super) fn frame(
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     //! Display scale, weighting and terminal-width regressions.
     use super::*;

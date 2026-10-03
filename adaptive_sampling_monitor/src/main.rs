@@ -1,4 +1,5 @@
 //! Live terminal monitor of primary mapped reads overlapping named BED regions.
+#![cfg_attr(coverage_nightly, feature(coverage_attribute))]
 
 mod bam_region_scan;
 mod bed;
@@ -124,6 +125,7 @@ fn run(args: Args) -> Result<()> {
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     //! Minimal positional parsing, including paths that resemble options.
     use super::*;

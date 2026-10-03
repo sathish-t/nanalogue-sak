@@ -35,6 +35,7 @@ pub(crate) fn check_path(path: &Path) -> Result<()> {
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     //! Input and output policy boundary cases.
     use super::*;
